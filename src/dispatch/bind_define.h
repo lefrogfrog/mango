@@ -139,7 +139,7 @@ void focusdir(const Arg *arg) {
 
 	if (config.focus_cross_monitor_mru && c && c->mon != selmon) {
 		focusmon(arg);
-		return 0;
+		return;
 	}
 
 	if (!selmon->isoverview)
@@ -368,7 +368,7 @@ void focusmon(const Arg *arg) {
 			warp_cursor(c);
 		}
 	}
-	return 0;
+	return;
 }
 
 void focusstack(const Arg *arg) {
