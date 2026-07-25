@@ -910,7 +910,7 @@ static void last_cursor_surface_destroy(struct wl_listener *listener,
 static int32_t keep_idle_inhibit(void *data);
 static void check_keep_idle_inhibit(Client *c);
 static void pre_calculate_before_arrange(Monitor *m, bool want_animation,
-										bool from_view, bool only_calculate);
+										 bool from_view, bool only_calculate);
 static void client_pending_fullscreen_state(Client *c, int32_t isfullscreen);
 static void client_pending_maximized_state(Client *c, int32_t ismaximized);
 static void client_pending_minimized_state(Client *c, int32_t isminimized);
@@ -4047,6 +4047,7 @@ void focusclient(Client *c, int32_t lift) {
 
 	/* Raise client in stacking order if requested */
 	if (c && lift) {
+		wlr_log(WLR_ERROR, "%s", client_get_title(c));
 		client_raise_group(c);
 	}
 
@@ -4304,7 +4305,6 @@ keybinding(uint32_t state, bool locked, uint32_t mods, xkb_keysym_t sym,
 	int32_t handled = 0;
 	const KeyBinding *k;
 	int32_t ji;
-	int32_t isbreak = 0;
 
 	if (is_keyboard_shortcut_inhibitor(seat->keyboard_state.focused_surface)) {
 		return false;
@@ -4347,10 +4347,10 @@ keybinding(uint32_t state, bool locked, uint32_t mods, xkb_keysym_t sym,
 			else
 				handled = 0;
 
-			isbreak = k->func(&k->arg);
+			k->func(&k->arg);
 
-			if (isbreak)
-				break;
+			// only match the first keybind
+			break;
 		}
 	}
 	return handled;
