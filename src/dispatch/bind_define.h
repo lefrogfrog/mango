@@ -2185,7 +2185,6 @@ void dwindle_set_split_direction(Client *c, bool istoggle, bool horizontal) {
 		return;
 
 	if (istoggle) {
-		// NOTE: we do this
 		leaf->custom_leaf_split_h = !leaf->custom_leaf_split_h;
 	} else if (horizontal) {
 		leaf->custom_leaf_split_h = true;
