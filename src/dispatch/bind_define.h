@@ -2251,7 +2251,7 @@ void dwindle_toggle_current_split(const Arg *arg) {
 	if (layout->id != DWINDLE)
 		return;
 
-	DwindleNode *root = c->mon->pertag->dwindle_root[selmon->pertag->curtag];
+	DwindleNode *root = c->mon->pertag->dwindle_root[c->mon->pertag->curtag];
 	DwindleNode *leaf = dwindle_find_leaf(root, c);
 	if (!leaf || !leaf->parent)
 		return; 
