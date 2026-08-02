@@ -50,6 +50,8 @@ typedef struct {
 	bool islockapply;
 	bool isreleaseapply;
 	bool ispassapply;
+	int line_number;
+	int file_index;
 } KeyBinding;
 
 typedef struct {
@@ -428,6 +430,9 @@ typedef struct {
 
 typedef void (*FuncType)(const Arg *);
 Config config;
+static char **file_paths = NULL;
+static int file_paths_count = 0;
+static int current_file_index = -1;
 
 bool parse_config_file(Config *config, const char *file_path, bool must_exist);
 bool apply_rule_to_state(Monitor *m, const ConfigMonitorRule *rule,
@@ -1375,7 +1380,7 @@ void run_exec_once() {
 	}
 }
 
-bool parse_option(Config *config, char *key, char *value) {
+bool parse_option(Config *config, char *key, char *value, int line_number) {
 	if (strcmp(key, "keymode") == 0) {
 		snprintf(config->keymode, sizeof(config->keymode), "%.27s", value);
 	} else if (strcmp(key, "animations") == 0) {
@@ -2678,6 +2683,8 @@ bool parse_option(Config *config, char *key, char *value) {
 
 		KeyBinding *binding = &config->key_bindings[config->key_bindings_count];
 		memset(binding, 0, sizeof(KeyBinding));
+		binding->line_number = line_number;
+		binding->file_index = current_file_index;
 
 		char mod_str[256], keysym_str[256], func_name[256],
 			arg_value[256] = "0\0", arg_value2[256] = "0\0",
@@ -3082,7 +3089,7 @@ bool parse_option(Config *config, char *key, char *value) {
 	return true;
 }
 
-bool parse_config_line(Config *config, const char *line) {
+bool parse_config_line(Config *config, const char *line, int line_number) {
 	char key[256], value[256];
 	if (sscanf(line, "%255[^=]=%255[^\n]", key, value) != 2) {
 		fprintf(stderr,
@@ -3095,7 +3102,7 @@ bool parse_config_line(Config *config, const char *line) {
 	trim_whitespace(key);
 	trim_whitespace(value);
 
-	return parse_option(config, key, value);
+	return parse_option(config, key, value, line_number);
 }
 
 bool parse_config_file(Config *config, const char *file_path, bool must_exist) {
@@ -3142,6 +3149,16 @@ bool parse_config_file(Config *config, const char *file_path, bool must_exist) {
 		file = fopen(file_path, "r");
 	}
 
+	// 保存当前文件索引，用于递归恢复
+	int saved_file_index = current_file_index;
+
+	// 将文件路径加入全局列表
+	file_paths = realloc(file_paths, (file_paths_count + 1) * sizeof(char *));
+	file_paths[file_paths_count] =
+		strdup(file_path); // 需要 strdup 申请独立内存
+	current_file_index = file_paths_count;
+	file_paths_count++;
+
 	if (!file) {
 		if (must_exist) {
 			fprintf(stderr,
@@ -3163,7 +3180,7 @@ bool parse_config_file(Config *config, const char *file_path, bool must_exist) {
 		if (line[0] == '#' || line[0] == '\n') {
 			continue;
 		}
-		parse_line_correct = parse_config_line(config, line);
+		parse_line_correct = parse_config_line(config, line, line_count);
 		if (!parse_line_correct) {
 			parse_correct = false;
 			fprintf(stderr,
@@ -3175,7 +3192,120 @@ bool parse_config_file(Config *config, const char *file_path, bool must_exist) {
 	}
 
 	fclose(file);
+
+	current_file_index = saved_file_index;
 	return parse_correct;
+}
+
+static const char *mod_to_string(uint32_t mod) {
+	static char buf[128];
+	buf[0] = '\0';
+	if (mod & WLR_MODIFIER_LOGO)
+		strcat(buf, "Super+");
+	if (mod & WLR_MODIFIER_CTRL)
+		strcat(buf, "Ctrl+");
+	if (mod & WLR_MODIFIER_ALT)
+		strcat(buf, "Alt+");
+	if (mod & WLR_MODIFIER_SHIFT)
+		strcat(buf, "Shift+");
+	if (mod & WLR_MODIFIER_MOD3)
+		strcat(buf, "Hyper+");
+	size_t len = strlen(buf);
+	if (len > 0)
+		buf[len - 1] = '\0';
+	else
+		strcpy(buf, "None");
+	return buf;
+}
+
+static int compare_keybind_by_key_only(const void *a, const void *b) {
+	const KeyBinding *ka = (const KeyBinding *)a;
+	const KeyBinding *kb = (const KeyBinding *)b;
+
+	if (ka->mod != kb->mod)
+		return (ka->mod > kb->mod) ? 1 : -1;
+
+	if (ka->keysymcode.type != kb->keysymcode.type)
+		return (ka->keysymcode.type > kb->keysymcode.type) ? 1 : -1;
+
+	if (ka->keysymcode.type == KEY_TYPE_SYM) {
+		if (ka->keysymcode.keysym != kb->keysymcode.keysym)
+			return (ka->keysymcode.keysym > kb->keysymcode.keysym) ? 1 : -1;
+	} else {
+		if (ka->keysymcode.keycode.keycode1 != kb->keysymcode.keycode.keycode1)
+			return (ka->keysymcode.keycode.keycode1 >
+					kb->keysymcode.keycode.keycode1)
+					   ? 1
+					   : -1;
+	}
+	return 0;
+}
+
+static bool same_key(const KeyBinding *a, const KeyBinding *b) {
+	return compare_keybind_by_key_only(a, b) == 0;
+}
+
+bool check_key_binding_conflicts(Config *config) {
+	int n = config->key_bindings_count;
+	if (n < 2)
+		return false;
+
+	/* 复制用户定义的绑定（行号 > 0） */
+	KeyBinding *binds = malloc(n * sizeof(KeyBinding));
+	int count = 0;
+	for (int i = 0; i < n; i++) {
+		if (config->key_bindings[i].line_number > 0)
+			binds[count++] = config->key_bindings[i];
+	}
+	if (count < 2) {
+		free(binds);
+		return false;
+	}
+
+	/* 只按按键排序，将相同按键的绑定排在一起 */
+	qsort(binds, count, sizeof(KeyBinding), compare_keybind_by_key_only);
+
+	bool conflict_found = false;
+
+	for (int i = 0; i < count;) {
+		int j = i;
+		/* 找出所有按键相同的绑定（区间 [i, j) ） */
+		while (j < count && same_key(&binds[i], &binds[j]))
+			j++;
+
+		/* 在该区间内检测冲突 */
+		for (int a = i; a < j; a++) {
+			for (int b = a + 1; b < j; b++) {
+				bool same_mode = (strcmp(binds[a].mode, binds[b].mode) == 0);
+				bool any_common =
+					binds[a].iscommonmode || binds[b].iscommonmode;
+				if (same_mode || any_common) {
+
+					const char *file_a = (binds[a].file_index >= 0)
+											 ? file_paths[binds[a].file_index]
+											 : "(built-in)";
+					const char *file_b = (binds[b].file_index >= 0)
+											 ? file_paths[binds[b].file_index]
+											 : "(built-in)";
+
+					conflict_found = true;
+					fprintf(stderr,
+							"\033[1;33m[WARNING]\033[0m Key binding conflict "
+							"in keymode \033[1;36m%s\033[0m:\n"
+							"  File \033[1;32m\"%s\"\033[0m, line "
+							"\033[1;35m%d\033[0m\n"
+							"  File \033[1;32m\"%s\"\033[0m, line "
+							"\033[1;35m%d\033[0m\n\n",
+							(any_common ? "common" : binds[a].mode), file_a,
+							binds[a].line_number, file_b, binds[b].line_number);
+				}
+			}
+		}
+		i = j; /* 跳到下一个按键组 */
+	}
+
+	free(binds);
+	return conflict_found;
 }
 
 void free_circle_layout(Config *config) {
@@ -3953,6 +4083,8 @@ void set_value_default() {
 }
 
 void set_default_key_bindings(Config *config) {
+	KeyBinding *b = NULL;
+
 	// 计算默认按键绑定的数量
 	size_t default_key_bindings_count =
 		sizeof(default_key_bindings) / sizeof(KeyBinding);
@@ -3970,9 +4102,11 @@ void set_default_key_bindings(Config *config) {
 	for (size_t i = 0; i < default_key_bindings_count; i++) {
 		config->key_bindings[config->key_bindings_count + i] =
 			default_key_bindings[i];
-		config->key_bindings[config->key_bindings_count + i].iscommonmode =
-			true;
-		config->key_bindings[config->key_bindings_count + i].islockapply = true;
+		b = &config->key_bindings[config->key_bindings_count + i];
+		b->iscommonmode = true;
+		b->islockapply = true;
+		b->line_number = 0;
+		strcpy(b->mode, "common");
 	}
 
 	// 更新按键绑定的总数
@@ -4051,11 +4185,24 @@ bool parse_config(void) {
 	}
 
 	bool parse_correct = true;
+	bool keybindings_conflict = false;
 	set_value_default();
 	parse_correct = parse_config_file(&config, filename, true);
 	set_default_key_bindings(&config);
 	override_config();
-	return parse_correct;
+	keybindings_conflict = check_key_binding_conflicts(&config);
+
+	// 释放文件路径列表
+	if (file_paths) {
+		for (int i = 0; i < file_paths_count; i++) {
+			free(file_paths[i]);
+		}
+		free(file_paths);
+		file_paths = NULL;
+		file_paths_count = 0;
+	}
+
+	return parse_correct || keybindings_conflict;
 }
 
 void reset_blur_params(void) {
