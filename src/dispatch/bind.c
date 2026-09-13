@@ -248,6 +248,10 @@ void focus_direction(const Arg *arg) {
 
 	if (!server.selected_monitor->isoverview)
 		c = get_focused_stack_client(c, arg->tc);
+	if (c && c->mon && c->mon != server.selected_monitor &&
+		config.focus_cross_monitor_mru) {
+		c = client_focus_top(c->mon);
+	}
 	if (c) {
 		client_focus(c, 1);
 		if (config.warpcursor)
