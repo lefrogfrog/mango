@@ -820,6 +820,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		config->hotarea_corner = atoi(value);
 	} else if (strcmp(key, "enable_hotarea") == 0) {
 		config->enable_hotarea = atoi(value);
+	} else if (strcmp(key, "hotarea_disable_on_fullscreen") == 0) {
+		config->hotarea_disable_on_fullscreen = atoi(value);
 	} else if (strcmp(key, "overviewgappi") == 0) {
 		config->overviewgappi = atoi(value);
 	} else if (strcmp(key, "overviewgappo") == 0) {
@@ -842,6 +844,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		config->numlockon = atoi(value);
 	} else if (strcmp(key, "idleinhibit_ignore_visible") == 0) {
 		config->idleinhibit_ignore_visible = atoi(value);
+	} else if (strcmp(key, "idleinhibit_when_fullscreen") == 0) {
+		config->idleinhibit_when_fullscreen = atoi(value);
 	} else if (strcmp(key, "sloppyfocus") == 0) {
 		config->sloppyfocus = atoi(value);
 	} else if (strcmp(key, "warpcursor") == 0) {
@@ -1542,6 +1546,7 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		rule->confine_pointer = -1;
 		rule->force_render = -1;
 		rule->activation_bypass = -1;
+		rule->confine_pointer = -1;
 		rule->isterm = -1;
 		rule->allow_csd = -1;
 		rule->force_fakemaximize = -1;
@@ -1678,6 +1683,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 					rule->noswallow = atoi(val);
 				} else if (strcmp(key, "noblur") == 0) {
 					rule->noblur = atoi(val);
+				} else if (strcmp(key, "confine_pointer") == 0) {
+					rule->confine_pointer = atoi(val);
 				} else if (strcmp(key, "scroller_proportion") == 0) {
 					rule->scroller_proportion = atof(val);
 				} else if (strcmp(key, "isfullscreen") == 0) {
@@ -3644,6 +3651,8 @@ void override_config(void) {
 	config.hotarea_size = CLAMP_INT(config.hotarea_size, 1, 1000);
 	config.hotarea_corner = CLAMP_INT(config.hotarea_corner, 0, 3);
 	config.enable_hotarea = CLAMP_INT(config.enable_hotarea, 0, 1);
+	config.hotarea_disable_on_fullscreen =
+		CLAMP_INT(config.hotarea_disable_on_fullscreen, 0, 1);
 	config.overviewgappi = CLAMP_INT(config.overviewgappi, 0, 1000);
 	config.overviewgappo = CLAMP_INT(config.overviewgappo, 0, 1000);
 	config.overcircle_center_ratio =
@@ -3669,6 +3678,8 @@ void override_config(void) {
 	config.focus_on_activate = CLAMP_INT(config.focus_on_activate, 0, 1);
 	config.idleinhibit_ignore_visible =
 		CLAMP_INT(config.idleinhibit_ignore_visible, 0, 1);
+	config.idleinhibit_when_fullscreen =
+		CLAMP_INT(config.idleinhibit_when_fullscreen, 0, 1);
 	config.sloppyfocus = CLAMP_INT(config.sloppyfocus, 0, 1);
 	config.warpcursor = CLAMP_INT(config.warpcursor, 0, 1);
 	config.drag_corner = CLAMP_INT(config.drag_corner, 0, 4);
@@ -3859,6 +3870,7 @@ void set_value_default() {
 	config.hotarea_size = 10;
 	config.hotarea_corner = BOTTOM_LEFT;
 	config.enable_hotarea = 0;
+	config.hotarea_disable_on_fullscreen = 1;
 	config.smartgaps = 0;
 	config.sloppyfocus = 1;
 	config.gappih = 5;
@@ -3915,6 +3927,7 @@ void set_value_default() {
 	config.gesture_swipe_min_speed_to_force = 10;
 
 	config.idleinhibit_ignore_visible = 0;
+	config.idleinhibit_when_fullscreen = 0;
 
 	config.borderpx = 4;
 	config.group_bar_height = 50;
@@ -4810,6 +4823,9 @@ FuncType parse_func_name(char *func_name, Arg *arg, char *arg_value,
 		func = quit;
 	} else if (strcmp(func_name, "create_virtual_output") == 0) {
 		func = create_virtual_output;
+		if (arg_value && arg_value[0] != '\0') {
+			(*arg).v = strdup(arg_value);
+		}
 	} else if (strcmp(func_name, "destroy_all_virtual_output") == 0) {
 		func = destroy_all_virtual_output;
 	} else if (strcmp(func_name, "moveresize") == 0) {
