@@ -53,6 +53,7 @@ enum { UP, DOWN, LEFT, RIGHT, UNDIR, ALLDIR }; /* smartmovewin */
 #define TAGMATCH(C, M)                                                         \
 	((C) && (M) && (C)->mon == (M) && !(C)->isminimized &&                     \
 	 (((C)->tags & (M)->tagset[(M)->seltags])))
+#define SCRATCHPAD_SHOWN(C) ((C) && (C)->is_in_scratchpad && !(C)->isminimized)
 #define ISFULLSCREEN(A)                                                        \
 	((A)->isfullscreen || (A)->ismaximizescreen ||                             \
 	 (A)->overview_ismaximizescreenbak || (A)->overview_isfullscreenbak)
@@ -118,7 +119,7 @@ struct Client {
 	bool xwl_req_valid;
 #endif
 	uint32_t bw;
-	uint32_t tags, oldtags, mini_restore_tag;
+	uint32_t tags, oldtags;
 	bool dirty;
 	int32_t xdg_geo_x, xdg_geo_y;
 	uint32_t configure_serial;
@@ -155,7 +156,6 @@ struct Client {
 	int32_t iscustompos;
 	int32_t iscustom_scroller_proportion;
 	int32_t iscustom_scroller_proportion_single;
-	int32_t is_scratchpad_show;
 	int32_t isglobal;
 	int32_t isnoborder;
 	int32_t isnoshadow;
@@ -194,7 +194,6 @@ struct Client {
 	float unfocused_opacity;
 	char oldmonname[128];
 	int32_t noblur;
-	int32_t confine_pointer;
 	float blur_opacity;
 	struct wlr_ext_foreign_toplevel_handle_v1 *ext_foreign_toplevel;
 	double master_mfact_per, master_inner_per, stack_inner_per;
@@ -245,6 +244,7 @@ bool xwayland_scene_buffer_point_accepts_input(struct wlr_scene_buffer *buffer,
 void xwayland_apply_scale(Client *c);
 void xwayland_logical_to_x11(struct wlr_box *box, float scale);
 void xwayland_x11_to_logical(struct wlr_box *box, float scale);
+void xwayland_screen_origin(int32_t *x, int32_t *y);
 void fix_xwayland_coordinate(struct wlr_box *geom);
 Monitor *xwayland_monitor(Client *c);
 #endif
@@ -395,6 +395,7 @@ void client_exchange(Client *c1, Client *c2);
 void client_replace(Client *c, Client *w, bool is_group_change_member,
 					bool is_swallow);
 bool client_jump_to_monitor(Client *c, Monitor *m, int32_t dir);
+void client_move_to_monitor(Client *c, Client *target, int32_t dir);
 void client_update_oldmonname_record(Client *c, Monitor *m);
 void client_apply_bounds(Client *c, struct wlr_box *bbox);
 void client_swap_layout_properties(Client *c1, Client *c2);
