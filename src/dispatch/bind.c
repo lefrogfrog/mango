@@ -21,9 +21,6 @@
 #include "mango/manage/monitor.h"
 #include "mango/overview/overview.h"
 #include <fcntl.h>
-#ifdef __linux__
-#include <sys/syscall.h>
-#endif
 #include <unistd.h>
 #include <wlr/backend.h>
 #include <wlr/backend/headless.h>
@@ -1259,19 +1256,6 @@ int32_t center_window(const Arg *arg) {
 	return 0;
 }
 
-static void close_inherited_fds(void) {
-#ifdef SYS_close_range
-	extern long syscall(long number, ...);
-	if (syscall(SYS_close_range, 3, ~0U, 0) == 0) {
-		return;
-	}
-#endif
-	int fd_max = sysconf(_SC_OPEN_MAX);
-	for (int i = 3; i < fd_max; i++) {
-		close(i);
-	}
-}
-
 int32_t spawn_shell(const Arg *arg) {
 	if (!arg->v)
 		return 0;
@@ -1282,8 +1266,6 @@ int32_t spawn_shell(const Arg *arg) {
 	if (fork() == 0) {
 		if (activation_token)
 			setenv("XDG_ACTIVATION_TOKEN", activation_token, 1);
-
-		close_inherited_fds();
 
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
@@ -1309,8 +1291,6 @@ int32_t spawn(const Arg *arg) {
 	if (fork() == 0) {
 		if (activation_token)
 			setenv("XDG_ACTIVATION_TOKEN", activation_token, 1);
-
-		close_inherited_fds();
 
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
@@ -1942,42 +1922,79 @@ int32_t toggle_view(const Arg *arg) {
 	return 0;
 }
 
+static uint32_t tags_last_tag_num(uint32_t tags) {
+	uint32_t i, last = 0;
+
+	for (i = 1; i <= (uint32_t)config.tag_num; i++) {
+		if (tags & (1u << (i - 1)))
+			last = i;
+	}
+	return last;
+}
+
+static uint32_t tag_gather_last_tag_num(Monitor *m) {
+	uint32_t last = 0, n;
+	Client *c = NULL;
+
+	wl_list_for_each(c, &server.clients, link) {
+		if (c->mon != m || c->iskilling || (c->tags & TAG0_MASK))
+			continue;
+		n = tags_last_tag_num(c->tags & TAGMASK);
+		if (n > last)
+			last = n;
+	}
+
+	if (++last > (uint32_t)config.tag_num)
+		last = (uint32_t)config.tag_num;
+	return last;
+}
+
 bool view_shift_tag(const Arg *arg, int dir) {
-	if (!server.selected_monitor)
+	Monitor *m = server.selected_monitor;
+	uint32_t cur, target, last;
+	bool wrapped = false;
+
+	if (!m)
 		return false;
 
-	if (server.selected_monitor->isoverview ||
-		server.selected_monitor->pertag->curtag == 0)
+	if (m->isoverview || m->pertag->curtag == 0)
 		return false;
 
-	uint32_t target =
-		server.selected_monitor->tagset[server.selected_monitor->seltags];
+	cur = get_tags_first_tag_num(m->tagset[m->seltags]);
+	last = config.tag_gather ? tag_gather_last_tag_num(m)
+							 : (uint32_t)config.tag_num;
+	target = m->tagset[m->seltags];
+
 	if (dir < 0) {
 		target >>= 1;
 
 		if (target == 0) {
 			if (!config.tag_carousel)
 				return false;
-			target = (1 << (config.tag_num - 1)) & TAGMASK;
-			server.selected_monitor->carousel_anim_dir = -1;
+			target = 1u << (last - 1);
+			wrapped = true;
 		}
 	} else {
 		target <<= 1;
 
-		if (!(target & TAGMASK)) {
-			if (!config.tag_carousel)
-				return false;
+		if (config.tag_carousel && cur >= last) {
 			target = 1;
-			server.selected_monitor->carousel_anim_dir = 1;
+			wrapped = true;
+		} else if (!(target & TAGMASK)) {
+			return false;
 		}
 	}
 
-	if (target ==
-		server.selected_monitor->tagset[server.selected_monitor->seltags])
+	target &= TAGMASK;
+
+	if (target == (m->tagset[m->seltags] & TAGMASK))
 		return false;
 
-	client_switch_view(&(Arg){.ui = target & TAGMASK, .i = arg->i}, true);
-	server.selected_monitor->carousel_anim_dir = 0;
+	if (wrapped)
+		m->carousel_anim_dir = dir < 0 ? -1 : 1;
+
+	client_switch_view(&(Arg){.ui = target, .i = arg->i}, true);
+	m->carousel_anim_dir = 0;
 	return true;
 }
 

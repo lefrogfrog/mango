@@ -350,12 +350,27 @@ int ipc_handle_connection(int fd, uint32_t mask, void *data) {
 
 	// Sets O_NONBLOCK
 	int flags = fcntl(client_fd, F_GETFL, 0);
-	fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+	if (flags == -1 || fcntl(client_fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+		mango_error(true, WLR_ERROR,
+					"failed to set O_NONBLOCK on IPC client socket");
+		close(client_fd);
+		return 0;
+	}
 	// Sets FD_CLOEXEC
 	flags = fcntl(client_fd, F_GETFD, 0);
-	fcntl(client_fd, F_SETFD, flags | FD_CLOEXEC);
+	if (flags == -1 || fcntl(client_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+		mango_error(true, WLR_ERROR,
+					"failed to set FD_CLOEXEC on IPC client socket");
+		close(client_fd);
+		return 0;
+	}
 
 	struct ipc_client_state *client = calloc(1, sizeof(*client));
+	if (!client) {
+		mango_error(true, WLR_ERROR, "failed to allocate IPC client");
+		close(client_fd);
+		return 0;
+	}
 	client->fd = client_fd;
 	client->loop = loop;
 	client->source = wl_event_loop_add_fd(
@@ -1307,7 +1322,6 @@ void ipc_init(struct wl_event_loop *loop) {
 	if (ipc_socket_fd < 0)
 		return;
 
-	// Sets FD_CLOEXEC
 	int flags = fcntl(ipc_socket_fd, F_GETFD, 0);
 	if (flags == -1 ||
 		fcntl(ipc_socket_fd, F_SETFD, flags | FD_CLOEXEC) == -1) {

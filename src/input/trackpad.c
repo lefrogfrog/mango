@@ -109,6 +109,7 @@ struct SwipeDrive {
 	double drag_prev_dx;
 	double drag_prev_dy;
 	uint32_t motion;
+	double max_delta;
 	int32_t (*func)(const Arg *);
 	Arg arg;
 };
@@ -288,50 +289,6 @@ static double swipe_drive_axis(void) {
 static void swipe_drive_apply(Monitor *m, double p) {
 	Client *c = NULL;
 
-	if (swipe_func_is_view(swipe_drive.func)) {
-		double extent = swipe_horizontal ? m->w.width : m->w.height;
-		int dir = (swipe_drive.motion == SWIPE_RIGHT ||
-				   swipe_drive.motion == SWIPE_DOWN)
-					  ? 1
-					  : -1;
-		int32_t shift = (int32_t)llround(p * dir * extent);
-		int32_t entry = (int32_t)llround((p - 1.0) * dir * extent);
-
-		wl_list_for_each(c, &server.clients, link) {
-			if (c->mon != m || !c->animation.running || !c->need_output_flush)
-				continue;
-			if (c->animation.action != TAG && c->animation.action != MOVE &&
-				c->animation.action != OVERVIEW && !c->animation.tagining &&
-				!c->animation.tagouting)
-				continue;
-
-			struct wlr_box box;
-			if (c->animation.tagouting) {
-				box = c->animation.initial;
-				if (swipe_horizontal)
-					box.x += shift;
-				else
-					box.y += shift;
-			} else if (c->animation.tagining) {
-				box = c->current;
-				if (swipe_horizontal)
-					box.x += entry;
-				else
-					box.y += entry;
-			} else {
-				client_animation_set_progress(c, p);
-				continue;
-			}
-
-			wlr_scene_node_set_position(&c->scene->node, box.x, box.y);
-			c->animation.current = box;
-			client_apply_clip(c, 1.0f);
-		}
-
-		request_fresh_all_monitors();
-		return;
-	}
-
 	wl_list_for_each(c, &server.clients, link) {
 		if (c->mon != m || !c->animation.running || !c->need_output_flush)
 			continue;
@@ -341,6 +298,7 @@ static void swipe_drive_apply(Monitor *m, double p) {
 			continue;
 		client_animation_set_progress(c, p);
 	}
+
 	request_fresh_all_monitors();
 }
 
@@ -701,20 +659,8 @@ static bool swipe_drive_update(uint32_t fingers, uint32_t time) {
 		return true;
 	}
 
-	if (delta <= -SWIPE_LOCK_DISTANCE) {
-		swipe_drive.base = axis;
-		if (!swipe_drive_fire_opposite())
-			return true;
-		if (!swipe_has_running_transition(m)) {
-			swipe_drive.active = false;
-			swipe_drive_unfreeze();
-			return true;
-		}
-		swipe_drive_freeze(m);
-		swipe_drive_apply(m, 0.0);
-		return true;
-	}
-
+	if (delta > swipe_drive.max_delta)
+		swipe_drive.max_delta = delta;
 	if (p < 0.0)
 		p = 0.0;
 	if (p > 1.0)
@@ -809,18 +755,19 @@ static void swipe_drive_end(void) {
 			p = 1.0;
 
 		uint32_t dur = swipe_drive.last_time - swipe_drive.first_time;
+		bool flick =
+			swipe_drive.speed_points > 0 &&
+			delta >= swipe_drive.max_delta - SWIPE_LOCK_DISTANCE &&
+			(swipe_drive.avg_speed >= config.gesture_swipe_min_speed_to_force ||
+			 dur <= SWIPE_FLICK_MAX_MS);
 		bool commit = swipe_func_is_overview(swipe_drive.func) ||
 					  delta >= distance * config.gesture_swipe_cancel_ratio ||
-					  (swipe_drive.speed_points > 0 &&
-					   (swipe_drive.avg_speed >=
-							config.gesture_swipe_min_speed_to_force ||
-						dur <= SWIPE_FLICK_MAX_MS));
+					  flick;
 
 		swipe_drive_unfreeze();
 
 		if (commit) {
 			Client *c = NULL;
-			bool mirror_view = swipe_func_is_view(swipe_drive.func);
 			mango_error(true, WLR_DEBUG,
 						"swipe drive: commit, p=%.2f speed=%.1f\n", p,
 						swipe_drive.avg_speed);
@@ -833,41 +780,7 @@ static void swipe_drive_end(void) {
 					!c->animation.tagouting)
 					continue;
 
-				if (mirror_view &&
-					(c->animation.tagouting || c->animation.tagining)) {
-					double extent = swipe_horizontal ? m->w.width : m->w.height;
-					int dir = (swipe_drive.motion == SWIPE_RIGHT ||
-							   swipe_drive.motion == SWIPE_DOWN)
-								  ? 1
-								  : -1;
-					int32_t shift = (int32_t)llround(dir * extent);
-					double remain = 1.0 - p;
-					if (remain < 0.05)
-						remain = 0.05;
-
-					struct wlr_box target;
-					if (c->animation.tagouting) {
-						target = c->animation.initial;
-						if (swipe_horizontal)
-							target.x += shift;
-						else
-							target.y += shift;
-					} else {
-						target = c->geom;
-					}
-
-					c->animation.initial = c->animation.current;
-					c->current = target;
-					c->pending = target;
-					c->animation.duration = (uint32_t)MANGO_MAX(
-						1, (int32_t)(c->animation.duration * remain));
-					c->animation.time_started = get_now_in_ms();
-					c->animation.action = TAG;
-					c->animation.running = true;
-					c->need_output_flush = true;
-				} else {
-					client_animation_resume(c, 1.0 - p);
-				}
+				client_animation_resume(c, 1.0 - p);
 			}
 			request_fresh_all_monitors();
 			if (!config.animations)

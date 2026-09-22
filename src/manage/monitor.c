@@ -144,6 +144,22 @@ bool is_centertile_layout(Monitor *m) {
 	return false;
 }
 
+void special_sync_top_layer(bool special_active) {
+	static bool top_in_special = false;
+
+	if (special_active == top_in_special)
+		return;
+	top_in_special = special_active;
+
+	if (special_active) {
+		wlr_scene_node_reparent(&server.layers[LyrTop]->node,
+								server.layers_wrap[LyrSpecialTop]);
+	} else {
+		wlr_scene_node_reparent(&server.layers[LyrTop]->node,
+								server.layers_wrap[LyrTop]);
+	}
+}
+
 // sync the special overlay dim layer to the monitor and view state
 void special_update_dim(Monitor *m) {
 	if (!m || !m->special_dim_rect)
@@ -601,6 +617,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 
 	struct wl_event_loop *loop = wl_display_get_event_loop(server.display);
 	m = wlr_output->data = ecalloc(1, sizeof(*m));
+	wlr_output_state_init(&m->pending);
 
 	m->iscleanuping = false;
 	m->skip_frame_timeout =
@@ -762,8 +779,9 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 	wlr_scene_output_layout_add_output(server.scene_layout, layout_output,
 									   m->scene_output);
 
-	// Gets the effective resolution.
-	wlr_output_effective_resolution(wlr_output, &m->m.width, &m->m.height);
+	// Gets the position and effective resolution from the layout, replacing the
+	// INT32_MAX "auto placement" sentinel before the nodes below are created.
+	wlr_output_layout_get_box(server.output_layout, wlr_output, &m->m);
 
 	// Adds it to the global monitor list.
 	wl_list_insert(&server.monitors, &m->link);
@@ -878,6 +896,7 @@ void handle_output_destroy(struct wl_listener *listener, void *data) {
 
 	wlr_color_transform_unref(m->icc_transform);
 	m->icc_transform = NULL;
+	wlr_output_state_finish(&m->pending);
 	free(m->pertag);
 	free(m);
 }
@@ -1158,6 +1177,12 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 
 	/* Updates xdg-output details after layout changes. */
 	xdg_output_update_all();
+
+#ifdef XWAYLAND
+	/* XWayland's output list may have changed (hotplug or DPMS). Reapply the
+	 * primary output once; the helper itself is single-flight. */
+	xwayland_primary_invalidate();
+#endif
 }
 
 void handle_output_manager_apply(struct wl_listener *listener, void *data) {
