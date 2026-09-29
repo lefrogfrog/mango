@@ -354,7 +354,52 @@ void client_set_scale(struct wlr_surface *s, float scale) {
  * stays logically scaled, and the buffer node is moved to the clip origin so
  * visible content stays at its on-screen position when the window overflows to
  * the left instead of spilling off-screen.
+ *
+ * A whole visible window uses xwayland_device_source_box instead, so the
+ * sampled size matches the device-pixel box wlroots draws and a fractional
+ * scale cannot stretch the buffer by one pixel.
  */
+#ifdef XWAYLAND
+/*
+ * Device-pixel size wlroots draws a logical box into: wlr_scene rounds both
+ * edges of the box separately (scale_box), so with fractional scaling the drawn
+ * size is not round(size * scale) but depends on where the box sits on the
+ * output.
+ */
+static int32_t xwayland_device_length(int32_t length, int32_t offset,
+									  float scale) {
+	return (int32_t)roundf((float)(offset + length) * scale) -
+		   (int32_t)roundf((float)offset * scale);
+}
+
+/*
+ * Source box (buffer pixels) that maps 1:1 onto the device-pixel box wlroots
+ * draws for the logical box at (dest_x, dest_y) sized dest_w x dest_h; (win_x,
+ * win_y) is the buffer's own logical origin.
+ *
+ * Sampling round(size * scale) pixels into a per-edge rounded device box
+ * stretches the buffer by one pixel and blurs text at fractional scales. Using
+ * the scene's own rounding keeps X11 content pixel-exact; the source box may
+ * then overhang the buffer by that pixel, which samples the edge pixel again
+ * instead of interpolating it.
+ */
+static void xwayland_device_source_box(Client *c, int32_t win_x, int32_t win_y,
+									   int32_t dest_x, int32_t dest_y,
+									   int32_t dest_w, int32_t dest_h,
+									   struct wlr_fbox *src) {
+	float scale = c->xwayland_scale > 0.f ? c->xwayland_scale : 1.f;
+	int32_t mon_x = c->mon ? c->mon->m.x : 0;
+	int32_t mon_y = c->mon ? c->mon->m.y : 0;
+
+	src->x = (float)((int32_t)roundf((float)(dest_x - mon_x) * scale) -
+					 (int32_t)roundf((float)(win_x - mon_x) * scale));
+	src->y = (float)((int32_t)roundf((float)(dest_y - mon_y) * scale) -
+					 (int32_t)roundf((float)(win_y - mon_y) * scale));
+	src->width = (float)xwayland_device_length(dest_w, dest_x - mon_x, scale);
+	src->height = (float)xwayland_device_length(dest_h, dest_y - mon_y, scale);
+}
+#endif
+
 void client_update_xwayland_clip(Client *c, struct wlr_box *clip) {
 #ifdef XWAYLAND
 	if (!c->xwl_root_buffer || !c->xwl_root_buffer->buffer)
@@ -369,41 +414,91 @@ void client_update_xwayland_clip(Client *c, struct wlr_box *clip) {
 	if (clip->width <= 0 || clip->height <= 0)
 		return;
 
-	struct wlr_fbox src = {
-		.x = (float)clip->x * scale,
-		.y = (float)clip->y * scale,
-		.width = (float)clip->width * scale,
-		.height = (float)clip->height * scale,
-	};
-	bool zoom_like = clip->x == 0 && clip->y == 0 &&
-					 clip->width < c->geom.width - 2 * (int32_t)c->bw &&
-					 clip->height < c->geom.height - 2 * (int32_t)c->bw;
-	if (zoom_like) {
-		src.x = 0;
-		src.y = 0;
-		src.width = buf->width;
-		src.height = buf->height;
-	}
-	/* Clamps to the physical buffer bounds to prevent out-of-range sampling. */
-	if (src.x < 0.f)
-		src.x = 0.f;
-	if (src.y < 0.f)
-		src.y = 0.f;
-	if (src.x + src.width > buf->width)
-		src.width = buf->width - src.x;
-	if (src.y + src.height > buf->height)
-		src.height = buf->height - src.y;
+	/* Buffer origin (client area) and its logical size. */
+	int32_t win_x = c->geom.x + (int32_t)c->bw;
+	int32_t win_y = c->geom.y + (int32_t)c->bw;
+	int32_t inner_w = c->geom.width - 2 * (int32_t)c->bw;
+	int32_t inner_h = c->geom.height - 2 * (int32_t)c->bw;
+
 	/*
-	 * When the clip origin is beyond the buffer, src.width/height can become
-	 * negative; guard against invalid source boxes so wlr_scene_buffer does not
-	 * misbehave.
+	 * Whole window visible: sample it exactly as the scene draws it, so a
+	 * fractional scale cannot stretch the buffer by one pixel. When the scene
+	 * draws the window one pixel wider or taller than the buffer, nearest
+	 * filtering repeats a pixel instead of interpolating it (sampling outside
+	 * the buffer is not allowed). A buffer that did not keep up with the window
+	 * (mid-resize) is scaled instead.
 	 */
-	if (src.width < 0.f)
-		src.width = 0.f;
-	if (src.height < 0.f)
-		src.height = 0.f;
+	struct wlr_fbox src;
+	bool nearest = false;
+	bool device_aligned = clip->x == 0 && clip->y == 0 &&
+						  clip->width == inner_w && clip->height == inner_h;
+	if (device_aligned) {
+		struct wlr_fbox dev;
+		xwayland_device_source_box(c, win_x, win_y, win_x, win_y, inner_w,
+								   inner_h, &dev);
+		/*
+		 * Cropping to the drawn box is 1:1 whatever the buffer size is, so a
+		 * bigger buffer is always cropped (it may hold a stale or hint-clamped
+		 * size). Only a smaller buffer needs nearest filtering to repeat a
+		 * pixel, and only for rounding; a stale small buffer is scaled instead.
+		 */
+		bool overhang =
+			dev.width > (float)buf->width || dev.height > (float)buf->height;
+		if (dev.width <= 0.f || dev.height <= 0.f ||
+			(overhang && (dev.width - (float)buf->width > 2.f ||
+						  dev.height - (float)buf->height > 2.f))) {
+			device_aligned = false;
+		} else {
+			nearest = overhang;
+			src = (struct wlr_fbox){
+				.x = dev.x,
+				.y = dev.y,
+				.width = MANGO_MIN(dev.width, (float)buf->width - dev.x),
+				.height = MANGO_MIN(dev.height, (float)buf->height - dev.y),
+			};
+		}
+	}
+
+	if (!device_aligned) {
+		src = (struct wlr_fbox){
+			.x = (float)clip->x * scale,
+			.y = (float)clip->y * scale,
+			.width = (float)clip->width * scale,
+			.height = (float)clip->height * scale,
+		};
+		bool zoom_like = clip->x == 0 && clip->y == 0 &&
+						 clip->width < inner_w && clip->height < inner_h;
+		if (zoom_like) {
+			src.x = 0;
+			src.y = 0;
+			src.width = buf->width;
+			src.height = buf->height;
+		}
+		/* Clamps to the physical buffer bounds to prevent out-of-range
+		 * sampling. */
+		if (src.x < 0.f)
+			src.x = 0.f;
+		if (src.y < 0.f)
+			src.y = 0.f;
+		if (src.x + src.width > buf->width)
+			src.width = buf->width - src.x;
+		if (src.y + src.height > buf->height)
+			src.height = buf->height - src.y;
+		/*
+		 * When the clip origin is beyond the buffer, src.width/height can
+		 * become negative; guard against invalid source boxes so
+		 * wlr_scene_buffer does not misbehave.
+		 */
+		if (src.width < 0.f)
+			src.width = 0.f;
+		if (src.height < 0.f)
+			src.height = 0.f;
+	}
 
 	wlr_scene_buffer_set_source_box(c->xwl_root_buffer, &src);
+	wlr_scene_buffer_set_filter_mode(c->xwl_root_buffer,
+									 nearest ? WLR_SCALE_FILTER_NEAREST
+											 : WLR_SCALE_FILTER_BILINEAR);
 	wlr_scene_buffer_set_dest_size(c->xwl_root_buffer, clip->width,
 								   clip->height);
 	/* Moves the buffer node to the clip origin so visible content stays at its
@@ -457,15 +552,9 @@ uint32_t client_set_size(Client *c, uint32_t width, uint32_t height) {
 		struct wlr_xwayland_surface *surface = c->surface.xwayland;
 		struct wlr_surface_state *state = &surface->surface->current;
 
-		/* Configure uses physical sizes (logical * xscale) so X11 renders 1:1.
-		 */
-		struct wlr_box xgeo = {
-			.x = c->geom.x + (int32_t)c->bw,
-			.y = c->geom.y + (int32_t)c->bw,
-			.width = c->geom.width - 2 * (int32_t)c->bw,
-			.height = c->geom.height - 2 * (int32_t)c->bw,
-		};
-		xwayland_logical_to_x11(&xgeo, c->xwayland_scale);
+		/* Configure uses physical sizes (see client_get_x11_geometry). */
+		struct wlr_box xgeo;
+		client_get_x11_geometry(c, &xgeo);
 		int32_t xw = xgeo.width;
 		int32_t xh = xgeo.height;
 		int32_t xx = xgeo.x;
@@ -1325,6 +1414,7 @@ void apply_rule_properties(Client *c, const ConfigWinRule *r) {
 	APPLY_INT_PROP(c, r, force_tiled_state);
 	APPLY_INT_PROP(c, r, force_tearing);
 	APPLY_INT_PROP(c, r, noswallow);
+	APPLY_INT_PROP(c, r, confine_pointer);
 	APPLY_INT_PROP(c, r, nofocus);
 	APPLY_INT_PROP(c, r, nofadein);
 	APPLY_INT_PROP(c, r, nofadeout);
@@ -1629,7 +1719,8 @@ void client_apply_rules(Client *c) {
 
 	// apply overlay rule
 	if (c->isoverlay && c->scene) {
-		wlr_scene_node_reparent(&c->scene->node, server.layers[LyrOverlay]);
+		wlr_scene_node_reparent(&c->scene->node,
+								server.layers[client_target_layer(c)]);
 	}
 }
 
@@ -2464,6 +2555,7 @@ void handle_client_destroy(struct wl_listener *listener, void *data) {
 		wl_list_remove(&c->set_decoration_mode.link);
 	}
 	switcher_remove_client(c);
+	pointer_client_destroyed(c);
 	free(c);
 }
 
@@ -2763,6 +2855,7 @@ void client_focus(Client *c, int32_t lift) {
 		if (server.active_constraint) {
 			pointer_constrain_cursor(NULL);
 		}
+		pointer_check_confine_client();
 		return;
 	}
 
@@ -2786,6 +2879,8 @@ void client_focus(Client *c, int32_t lift) {
 	}
 
 	client_ensure_constraint(c);
+
+	pointer_check_confine_client();
 }
 
 void client_active(Client *c) {
@@ -3893,11 +3988,11 @@ void client_add_jump_label_node(Client *c) {
 // scene layer a client belongs to; shown scratchpads join the special
 // layers while the special workspace is active
 uint32_t client_target_layer(Client *c) {
-	if (c->isoverlay)
-		return LyrOverlay;
-
 	bool special_overlay = (c->tags & TAG0_MASK) ||
 						   (is_special_active(c->mon) && SCRATCHPAD_SHOWN(c));
+
+	if (c->isoverlay)
+		return special_overlay ? LyrSpecialOverlay : LyrOverlay;
 
 	if (config.float_full_to_top) {
 		if (special_overlay)
@@ -4231,6 +4326,32 @@ void xwayland_x11_to_logical(struct wlr_box *box, float scale) {
 	box->height = (int32_t)roundf(box->height / scale);
 }
 
+/* X11 (physical) geometry a client window is configured with. Fullscreen X11
+ * windows take the output's physical (rotation-aware) resolution: the truncated
+ * layout box scaled back (2560 / 1.5 -> 1706 -> 2559) is 1px short of it. */
+void client_get_x11_geometry(Client *c, struct wlr_box *xgeo) {
+	if (config.xwayland_ignore_scale && c->isfullscreen && c->mon &&
+		!client_is_unmanaged(c)) {
+		/* Fullscreen: the window is exactly the output, so configure it with
+		 * the physical resolution. */
+		int32_t width, height, ox, oy;
+		wlr_output_transformed_resolution(c->mon->wlr_output, &width, &height);
+		xwayland_screen_origin(&ox, &oy);
+		xgeo->x = (int32_t)roundf((c->mon->m.x - ox) * c->xwayland_scale);
+		xgeo->y = (int32_t)roundf((c->mon->m.y - oy) * c->xwayland_scale);
+		xgeo->width = width;
+		xgeo->height = height;
+	} else {
+		/* Others (non-fullscreen, xwayland_ignore_scale off, unmanaged):
+		 * logical geometry -> physical coordinates, X11 renders 1:1. */
+		xgeo->x = c->geom.x + (int32_t)c->bw;
+		xgeo->y = c->geom.y + (int32_t)c->bw;
+		xgeo->width = c->geom.width - 2 * (int32_t)c->bw;
+		xgeo->height = c->geom.height - 2 * (int32_t)c->bw;
+		xwayland_logical_to_x11(xgeo, c->xwayland_scale);
+	}
+}
+
 void fix_xwayland_coordinate(struct wlr_box *geom) {
 	if (!server.selected_monitor)
 		return;
@@ -4383,16 +4504,9 @@ void handle_xwayland_surface_commit(struct wl_listener *listener, void *data) {
 	/* Overview card nodes are independent scene_surfaces that auto-update on
 	 * commit. */
 
-	/* Compares the acked X11 geometry with the one mango configured: sizes are
-	 * physical (logical * scale), positions are relative to the screen origin.
-	 */
-	struct wlr_box xgeo = {
-		.x = c->geom.x + (int32_t)c->bw,
-		.y = c->geom.y + (int32_t)c->bw,
-		.width = c->geom.width - 2 * (int32_t)c->bw,
-		.height = c->geom.height - 2 * (int32_t)c->bw,
-	};
-	xwayland_logical_to_x11(&xgeo, c->xwayland_scale);
+	/* Compares the acked X11 geometry with the one mango configured. */
+	struct wlr_box xgeo;
+	client_get_x11_geometry(c, &xgeo);
 
 	if (xgeo.width == (int32_t)state->width &&
 		xgeo.height == (int32_t)state->height &&

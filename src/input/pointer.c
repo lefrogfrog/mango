@@ -172,6 +172,46 @@ static bool pointer_client_visible(Client *c) {
 		   VISIBLEON(c, c->mon);
 }
 
+static Client *confine_pointer_last = NULL;
+
+#define CONFINE_POINTER_MARGIN 5
+
+static Client *pointer_confine_rule_client(void) {
+	Client *c = NULL;
+
+	if (server.seat->keyboard_state.focused_surface) {
+		toplevel_from_wlr_surface(server.seat->keyboard_state.focused_surface,
+								  &c, NULL);
+	}
+	if (!c && server.selected_monitor) {
+		c = server.selected_monitor->sel;
+	}
+
+	if (!c || !c->confine_pointer || !client_surface(c)->mapped || !c->mon ||
+		c->mon->isoverview || c->isminimized || !VISIBLEON(c, c->mon) ||
+		!pointer_node_enabled(&c->scene->node)) {
+		return NULL;
+	}
+	return c;
+}
+
+void pointer_check_confine_client(void) {
+	Client *c = pointer_confine_rule_client();
+
+	if (c && c != confine_pointer_last && pointer_cursor_outside_client(c)) {
+		struct wlr_box box = pointer_client_warp_box(c);
+		wlr_cursor_warp(server.cursor, NULL, box.x + box.width / 2.0,
+						box.y + box.height / 2.0);
+	}
+	confine_pointer_last = c;
+}
+
+void pointer_client_destroyed(Client *c) {
+	if (confine_pointer_last == c) {
+		confine_pointer_last = NULL;
+	}
+}
+
 static bool pointer_constraint_surface_visible(
 	struct wlr_pointer_constraint_v1 *constraint) {
 	Client *c = NULL;
@@ -978,6 +1018,28 @@ void pointer_process_motion(uint32_t time, struct wlr_input_device *device,
 			}
 		}
 
+		Client *rule_client = pointer_confine_rule_client();
+		if (!server.active_constraint && rule_client) {
+			struct wlr_box box = pointer_client_warp_box(rule_client);
+			double min_x = box.x + rule_client->bw + CONFINE_POINTER_MARGIN;
+			double min_y = box.y + rule_client->bw + CONFINE_POINTER_MARGIN;
+			double max_x = box.x + box.width - rule_client->bw -
+						   CONFINE_POINTER_MARGIN - 1;
+			double max_y = box.y + box.height - rule_client->bw -
+						   CONFINE_POINTER_MARGIN - 1;
+
+			if (max_x < min_x) {
+				max_x = min_x;
+			}
+			if (max_y < min_y) {
+				max_y = min_y;
+			}
+			dx = MANGO_MIN(MANGO_MAX(server.cursor->x + dx, min_x), max_x) -
+				 server.cursor->x;
+			dy = MANGO_MIN(MANGO_MAX(server.cursor->y + dy, min_y), max_y) -
+				 server.cursor->y;
+		}
+
 		wlr_cursor_move(server.cursor, device, dx, dy);
 		pointer_cursor_activity();
 		wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat);
@@ -1283,8 +1345,8 @@ void pointer_warp_to_monitor(Monitor *m) {
 void handle_new_virtual_pointer(struct wl_listener *listener, void *data) {
 	struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
 	struct wlr_input_device *device = &event->new_pointer->pointer.base;
-	wlr_seat_set_capabilities(server.seat, server.seat->capabilities |
-											   WL_SEAT_CAPABILITY_POINTER);
+
+	seat_device_add(device);
 	wlr_cursor_attach_input_device(server.cursor, device);
 	if (event->suggested_output)
 		wlr_cursor_map_input_to_output(server.cursor, device,

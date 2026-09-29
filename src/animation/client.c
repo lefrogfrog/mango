@@ -521,6 +521,11 @@ void client_draw_dim(Client *c, struct ivec2 clip_box) {
 		return;
 	}
 
+	if (c->isfullscreen) {
+		mango_dim_node_set_enabled(c->dim_node, false);
+		return;
+	}
+
 	if (!config.dim_enable) {
 		mango_dim_node_set_enabled(c->dim_node, false);
 		return;
@@ -701,14 +706,6 @@ void client_draw_border(Client *c, struct ivec2 offsets) {
 							c->mon->visible_tiling_clients == 1)
 			? corner_radii_none()
 			: set_client_corner_location(c);
-
-	if (hit_no_border) {
-		c->bw = 0;
-		c->fake_no_border = true;
-	} else if (!c->isfullscreen && VISIBLEON(c, c->mon)) {
-		c->bw = c->isnoborder ? 0 : config.borderpx;
-		c->fake_no_border = false;
-	}
 
 	struct wlr_box cur = c->animation.current;
 	int32_t bw = (int32_t)c->bw;
@@ -1250,9 +1247,12 @@ void client_animation_next_tick(Client *c) {
 			wlr_scene_node_set_enabled(&c->scene->node, false);
 			c->animation.tagouted = true;
 			c->animation.current = c->geom;
+			client_apply_clip(c, 1.0f);
+		} else {
+			/* Snap to the final box: an interpolated one can be a pixel off,
+			 * which leaves X11 content stretched (blurry). */
+			client_apply_finish_geometry(c);
 		}
-
-		client_apply_clip(c, 1.0f);
 
 		Client *pointer_c = NULL;
 		double sx, sy;
@@ -1261,7 +1261,8 @@ void client_animation_next_tick(Client *c) {
 		struct wlr_surface *surface =
 			pointer_c && pointer_c == c ? client_surface(pointer_c) : NULL;
 
-		if (surface && pointer_c == server.selected_monitor->sel &&
+		if (surface && server.selected_monitor &&
+			pointer_c == server.selected_monitor->sel &&
 			!server.selected_monitor->isoverview)
 			wlr_seat_pointer_notify_enter(server.seat, surface, sx, sy);
 
@@ -1553,11 +1554,15 @@ void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 
 	if (c->isnoborder || c->iskilling)
 		c->bw = 0;
+	else if (!c->isfullscreen)
+		c->bw = config.borderpx;
 
 	bool hit_no_border = check_hit_no_border(c);
 	if (hit_no_border) {
 		c->bw = 0;
 		c->fake_no_border = true;
+	} else {
+		c->fake_no_border = false;
 	}
 
 	if (!c->mon->isoverview)
@@ -1738,9 +1743,10 @@ bool client_apply_focus_opacity(Client *c) {
 		float percent = config.animation_fade_in && !c->nofadein
 							? opacity_eased_progress
 							: 1.0;
-		float opacity = c == server.selected_monitor->sel
-							? c->focused_opacity
-							: c->unfocused_opacity;
+		float opacity =
+			(server.selected_monitor && c == server.selected_monitor->sel)
+				? c->focused_opacity
+				: c->unfocused_opacity;
 		float target_opacity = percent * (1.0 - config.fadein_begin_opacity) +
 							   config.fadein_begin_opacity;
 
@@ -1795,7 +1801,7 @@ bool client_apply_focus_opacity(Client *c) {
 
 		if (client_step_focus_animation(c, linear_progress))
 			return true;
-	} else if (c == server.selected_monitor->sel) {
+	} else if (server.selected_monitor && c == server.selected_monitor->sel) {
 		c->opacity_animation.running = false;
 		c->opacity_animation.current_opacity = c->focused_opacity;
 		memcpy(c->opacity_animation.current_border_color, border_color,

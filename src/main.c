@@ -15,6 +15,7 @@
 #include "mango/ext-protocol/text-input.h"
 #include "mango/ext-protocol/xdg-activation.h"
 #include "mango/ext-protocol/xdg-output.h"
+#include "mango/input/device.h"
 #include "mango/input/keyboard.h"
 #include "mango/input/pointer.h"
 #include "mango/input/tablet.h"
@@ -123,6 +124,7 @@
 #endif
 
 void handle_quit_signal(int32_t signo);
+void unset_activation_env(void);
 
 void handle_signal(int32_t signo) {
 	if (signo == SIGCHLD)
@@ -198,6 +200,8 @@ void cleanup_listeners(void) {
 
 void cleanup(void) {
 	server.allow_frame_scheduling = false;
+
+	unset_activation_env();
 
 	ipc_cleanup();
 	cleanup_listeners();
@@ -285,6 +289,48 @@ void set_activation_env() {
 
 cleanup:
 	free(env_keys);
+}
+
+void unset_activation_env(void) {
+	if (!getenv("DBUS_SESSION_BUS_ADDRESS")) {
+		mango_error(true, WLR_INFO,
+					"Not clearing dbus execution environment: "
+					"DBUS_SESSION_BUS_ADDRESS not set");
+		return;
+	}
+
+	mango_error(true, WLR_INFO, "Clearing dbus execution environment");
+
+	char *env_keys = join_strings(env_vars, " ");
+	char *env_unset_keys = join_strings_with_suffix(env_vars, "=", " ");
+	if (!env_keys || !env_unset_keys) {
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
+		goto cleanup;
+	}
+
+	mango_exec("systemctl --user stop graphical-session.target");
+
+	char *cmd1 =
+		string_printf("systemctl --user unset-environment %s", env_keys);
+	if (!cmd1) {
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
+		goto cleanup;
+	}
+	mango_exec(cmd1);
+	free(cmd1);
+
+	char *cmd2 =
+		string_printf("dbus-update-activation-environment %s", env_unset_keys);
+	if (!cmd2) {
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
+		goto cleanup;
+	}
+	mango_exec(cmd2);
+	free(cmd2);
+
+cleanup:
+	free(env_keys);
+	free(env_unset_keys);
 }
 
 void run(char *startup_cmd, int readiness_fd) {
@@ -706,6 +752,7 @@ void setup(void) {
 	 * to let us know when new input devices are available on the backend.
 	 */
 	wl_list_init(&server.input_devices);
+	wl_list_init(&server.seat_devices);
 	wl_list_init(&server.standalone_keyboards);
 	wl_list_init(&server.virtual_keyboards);
 	wl_list_init(&server.tablets);
@@ -751,6 +798,7 @@ void setup(void) {
 				  &server.cursor_touch_frame_listener);
 
 	server.seat = wlr_seat_create(server.display, "seat0");
+	update_seat_capabilities();
 
 	wl_list_init(&server.last_cursor_surface_destroy_listener.link);
 	wl_signal_add(&server.seat->events.request_set_cursor,

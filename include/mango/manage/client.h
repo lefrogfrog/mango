@@ -207,6 +207,7 @@ struct Client {
 	bool isleftstack;
 	int32_t tearing_hint;
 	int32_t force_tearing;
+	int32_t confine_pointer;
 	int32_t allow_shortcuts_inhibit;
 	float scroller_proportion_single;
 	bool isfocusing;
@@ -458,6 +459,8 @@ void xwayland_logical_to_x11(struct wlr_box *box, float scale);
 
 /* X11 physical size -> Wayland logical coordinates (logical = X11 / scale). */
 void xwayland_x11_to_logical(struct wlr_box *box, float scale);
+
+void client_get_x11_geometry(Client *c, struct wlr_box *xgeo);
 void fix_xwayland_coordinate(struct wlr_box *geom);
 void handle_xwayland_surface_request_activate(struct wl_listener *listener,
 											  void *data);

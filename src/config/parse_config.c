@@ -1619,6 +1619,7 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		rule->force_tiled_state = -1;
 		rule->force_tearing = -1;
 		rule->noswallow = -1;
+		rule->confine_pointer = -1;
 		rule->noblur = -1;
 		rule->nofocus = -1;
 		rule->nofadein = -1;
@@ -1746,6 +1747,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 					rule->force_tearing = atoi(val);
 				} else if (strcmp(key, "noswallow") == 0) {
 					rule->noswallow = atoi(val);
+				} else if (strcmp(key, "confine_pointer") == 0) {
+					rule->confine_pointer = atoi(val);
 				} else if (strcmp(key, "noblur") == 0) {
 					rule->noblur = atoi(val);
 				} else if (strcmp(key, "scroller_proportion") == 0) {
@@ -1816,6 +1819,7 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 		rule->drag_lock = -1;
 		rule->button_map = UINT32_MAX;
 		rule->disable_while_typing = -1;
+		rule->map_focus_monitor = -1;
 		rule->accel_speed = NAN;
 
 		bool parse_error = false;
@@ -1894,6 +1898,8 @@ bool parse_option(Config *config, char *key, char *value, int line_number) {
 					rule->disable_while_typing = CLAMP_INT(atoi(val), 0, 1);
 				} else if (strcmp(key, "monitor") == 0) {
 					snprintf(rule->monitor, sizeof(rule->monitor), "%s", val);
+				} else if (strcmp(key, "map_focus_monitor") == 0) {
+					rule->map_focus_monitor = CLAMP_INT(atoi(val), 0, 1);
 				} else {
 					mango_error(false, WLR_ERROR,
 								"Unknown device rule option: %s\n", key);
@@ -4775,6 +4781,7 @@ int32_t reload_config(const Arg *arg) {
 	parse_config();
 	reset_tag(old_tag_num);
 	reset_option();
+	update_seat_capabilities();
 	printstatus(IPC_WATCH_ARRANGGE);
 	return 1;
 }

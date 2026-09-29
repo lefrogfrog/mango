@@ -16,7 +16,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 
 /* Maps the wlr_layer_shell layer enum to scene layers. */
-static const int32_t layermap[] = {LyrBg, LyrBottom, LyrTop, LyrOverlay};
+static const int32_t layermap[] = {LyrBg, LyrBottom, LyrTop, LyrSpecialOverlay};
 
 void arrange_layer(Monitor *m, struct wl_list *list,
 				   struct wlr_box *usable_area, int32_t exclusive) {
@@ -41,6 +41,9 @@ void arrange_layer(Monitor *m, struct wl_list *list,
 }
 
 void layer_focus(LayerSurface *l) {
+	if (server.session_locked)
+		return;
+
 	client_focus(NULL, 0);
 	mango_im_relay_set_focus(server.input_method_relay,
 							 l->layer_surface->surface);
