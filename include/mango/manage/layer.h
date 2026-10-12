@@ -31,9 +31,9 @@ typedef struct LayerSurface {
 
 	struct mango_animation animation;
 	bool dirty;
-	int32_t noblur;
-	int32_t noanim;
-	int32_t noshadow;
+	int32_t no_blur;
+	int32_t no_animation;
+	int32_t no_shadow;
 	int32_t animation_type_open;
 	int32_t animation_type_close;
 	bool shield_when_capture;
@@ -56,6 +56,7 @@ void reset_exclusive_layers_focus(Monitor *m);
 void arrange_layers(Monitor *m);
 void iter_layer_scene_buffers(struct wlr_scene_buffer *buffer, int32_t sx,
 							  int32_t sy, void *user_data);
+bool layer_blur_uses_wallpaper(LayerSurface *l);
 void layer_flush_blur_background(LayerSurface *l);
 void handle_layer_surface_map(struct wl_listener *listener, void *data);
 void handle_layer_surface_commit(struct wl_listener *listener, void *data);

@@ -32,8 +32,6 @@ static bool info_pending = false;
 static xcb_randr_get_output_info_cookie_t info_cookie;
 static xcb_randr_output_t *outputs = NULL;
 static int32_t outputs_len = 0, outputs_idx = 0;
-static struct wl_event_source *ready_timer = NULL;
-static bool ready_pending = false;
 static bool cache_refresh_attempted = false;
 
 static bool xwayland_server_running(void) {
@@ -67,6 +65,7 @@ static void xwayland_primary_close(void) {
 		conn = NULL;
 	}
 	root = XCB_NONE;
+	applied_name[0] = '\0';
 	resources_pending = false;
 	info_pending = false;
 	free(outputs);
@@ -117,19 +116,6 @@ static void xwayland_primary_build_cache(void) {
 	xcb_flush(conn);
 }
 
-static int32_t xwayland_primary_ready_timer(void *data) {
-	struct wl_event_source *source = ready_timer;
-	ready_timer = NULL;
-	if (source) {
-		wl_event_source_remove(source);
-	}
-
-	ready_pending = false;
-
-	xwayland_primary_start();
-	return 0;
-}
-
 static void xwayland_primary_apply(void) {
 	if (!conn) {
 		return;
@@ -151,11 +137,13 @@ static void xwayland_primary_apply(void) {
 		}
 		xcb_randr_set_output_primary(conn, root, cache_output[i]);
 		xcb_flush(conn);
+		/* Round trip so the request is taken before the connection is dropped
+		 * below, a plain flush can be lost with the disconnect. */
+		free(xcb_randr_get_output_primary_reply(
+			conn, xcb_randr_get_output_primary(conn, root), NULL));
 		strncpy(applied_name, target_name, XWL_NAME_MAX - 1);
 		applied_name[XWL_NAME_MAX - 1] = '\0';
 		cache_refresh_attempted = false;
-		free(xcb_randr_get_output_primary_reply(
-			conn, xcb_randr_get_output_primary(conn, root), NULL));
 		xwayland_primary_close();
 		return;
 	}
@@ -171,9 +159,6 @@ static void xwayland_primary_apply(void) {
 }
 
 static void xwayland_primary_start(void) {
-	if (ready_pending) {
-		return;
-	}
 	if (strncmp(applied_name, target_name, XWL_NAME_MAX) == 0) {
 		return;
 	}
@@ -263,43 +248,55 @@ static int32_t xwayland_primary_ready(int32_t fd, uint32_t mask, void *data) {
 	return 0;
 }
 
-void xwayland_primary_init(void) {
-	const char *display =
-		server.xwayland ? server.xwayland->display_name : NULL;
-	if (!display) {
-		return;
+/* Monitor the monitor rules designate as the X11 primary output: the monitor of
+ * the earliest rule asking for it, else the monitor of the earliest matching
+ * rule, else the first enabled monitor. X11 clients always have a stable
+ * origin either way. */
+static Monitor *xwayland_primary_rule_monitor(void) {
+	Monitor *m = NULL, *first = NULL, *by_rule = NULL, *primary = NULL;
+	int32_t best_rule = INT32_MAX, primary_rule = INT32_MAX;
+
+	/* The list is head-inserted, walk it backwards to start at the monitor
+	 * that was connected first. */
+	wl_list_for_each_reverse(m, &server.monitors, link) {
+		int32_t i;
+
+		if (!m->wlr_output || !m->wlr_output->enabled) {
+			continue;
+		}
+		if (!first) {
+			first = m;
+		}
+
+		/* Only the first matching rule applies to a monitor. */
+		for (i = 0; i < config.monitor_rules_count; i++) {
+			if (monitor_matches_rule(m, &config.monitor_rules[i])) {
+				break;
+			}
+		}
+		if (i >= config.monitor_rules_count) {
+			continue;
+		}
+		if (config.monitor_rules[i].primary) {
+			if (i < primary_rule) {
+				primary_rule = i;
+				primary = m;
+			}
+			continue;
+		}
+		if (i < best_rule) {
+			best_rule = i;
+			by_rule = m;
+		}
 	}
 
-	xwayland_primary_close();
-	strncpy(display_name, display, XWL_NAME_MAX - 1);
-	display_name[XWL_NAME_MAX - 1] = '\0';
-	applied_name[0] = '\0';
-
-	if (server.selected_monitor && server.selected_monitor->wlr_output &&
-		server.selected_monitor->wlr_output->name) {
-		strncpy(target_name, server.selected_monitor->wlr_output->name,
-				XWL_NAME_MAX - 1);
-		target_name[XWL_NAME_MAX - 1] = '\0';
-	} else {
-		target_name[0] = '\0';
+	if (primary) {
+		return primary;
 	}
-
-	ready_pending = false;
-	cache_refresh_attempted = false;
-
-	if (!ready_timer) {
-		ready_timer =
-			wl_event_loop_add_timer(wl_display_get_event_loop(server.display),
-									xwayland_primary_ready_timer, NULL);
-	}
-	if (ready_timer) {
-		wl_event_source_timer_update(ready_timer, 500);
-	}
-
-	xwayland_primary_start();
+	return by_rule ? by_rule : first;
 }
 
-void xwayland_primary_set(Monitor *m) {
+static void xwayland_primary_set(Monitor *m) {
 	const char *display =
 		server.xwayland ? server.xwayland->display_name : NULL;
 	if (!display || !m || !m->wlr_output || !m->wlr_output->name) {
@@ -317,27 +314,41 @@ void xwayland_primary_set(Monitor *m) {
 	strncpy(target_name, m->wlr_output->name, XWL_NAME_MAX - 1);
 	target_name[XWL_NAME_MAX - 1] = '\0';
 
-	if (ready_pending ||
-		strncmp(applied_name, target_name, XWL_NAME_MAX) == 0) {
+	if (strncmp(applied_name, target_name, XWL_NAME_MAX) == 0) {
 		return;
 	}
 
 	xwayland_primary_start();
 }
 
-void xwayland_primary_invalidate(void) {
+void xwayland_primary_init(void) {
+	const char *display =
+		server.xwayland ? server.xwayland->display_name : NULL;
+	if (!display) {
+		return;
+	}
+
+	xwayland_primary_close();
+	strncpy(display_name, display, XWL_NAME_MAX - 1);
+	display_name[XWL_NAME_MAX - 1] = '\0';
+
+	xwayland_primary_update();
+}
+
+/* Points the X11 primary output at the monitor the rules select. The primary
+ * output is only ever driven by the rules, never by focus or pointer position,
+ * so clients keep a stable coordinate origin for the whole session. */
+void xwayland_primary_update(void) {
 	cache_refresh_attempted = false;
 	applied_name[0] = '\0';
-
-	if (ready_pending) {
-		return;
-	}
-	if (resources_pending || info_pending) {
-		return;
-	}
-
 	cache_valid = false;
-	xwayland_primary_start();
+
+	Monitor *m = xwayland_primary_rule_monitor();
+	if (m) {
+		xwayland_primary_set(m);
+	} else {
+		target_name[0] = '\0';
+	}
 }
 
 #endif

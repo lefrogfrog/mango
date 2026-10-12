@@ -1,6 +1,7 @@
 /* Trackpad gestures (swipe / pinch / hold). */
 #include "mango/input/trackpad.h"
 #include "mango/animation/client.h"
+#include "mango/common/input-event-codes.h"
 #include "mango/common/log.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
@@ -18,7 +19,6 @@
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
 #include "mango/switcher/switcher.h"
-#include <linux/input-event-codes.h>
 #include <scenefx/types/wlr_scene.h>
 #include <wlr/backend/libinput.h>
 #include <wlr/types/wlr_cursor.h>
@@ -487,7 +487,7 @@ static bool swipe_drive_begin(uint32_t fingers) {
 		Client *target = m->sel;
 
 		if (!pointer_begin_move_resize(target, exec_arg.ui, server.cursor->x,
-									   server.cursor->y)) {
+									   server.cursor->y, 0)) {
 			swipe_drive.consumed = false;
 			swipe_drive_log_state(m, "drag: no window to move", false,
 								  sel_before);

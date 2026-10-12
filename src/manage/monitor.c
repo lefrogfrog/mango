@@ -343,6 +343,17 @@ Monitor *device_target_monitor(struct wlr_input_device *device) {
 	return server.selected_monitor;
 }
 
+bool blur_layer_on_wallpaper(uint32_t layer) {
+	switch (layer) {
+	case LyrBottom:
+	case LyrTile:
+	case LyrMaximize:
+		return true;
+	default:
+		return false;
+	}
+}
+
 bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
 							   struct wlr_output_state *state) {
 	struct wlr_output *wlr_output = scene_output->output;
@@ -360,7 +371,8 @@ bool mango_scene_output_commit(struct wlr_scene_output *scene_output,
 		state->committed &
 		(WLR_OUTPUT_STATE_MODE | WLR_OUTPUT_STATE_SCALE |
 		 WLR_OUTPUT_STATE_TRANSFORM | WLR_OUTPUT_STATE_ENABLED |
-		 WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED);
+		 WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED |
+		 WLR_OUTPUT_STATE_IMAGE_DESCRIPTION);
 	if (!state_changed && !wlr_scene_output_needs_frame(scene_output))
 		return true;
 
@@ -563,8 +575,10 @@ bool apply_rule_to_state(Monitor *m, const ConfigMonitorRule *rule,
 					m->wlr_output->name);
 
 	if (rule->width > 0 && rule->height > 0 && rule->refresh > 0) {
-		struct wlr_output_mode *internal_mode = get_nearest_output_mode(
-			m->wlr_output, rule->width, rule->height, rule->refresh);
+		struct wlr_output_mode *internal_mode = NULL;
+		if (!rule->custom)
+			internal_mode = get_nearest_output_mode(
+				m->wlr_output, rule->width, rule->height, rule->refresh);
 		if (internal_mode) {
 			wlr_output_state_set_mode(state, internal_mode);
 			mode_set = true;
@@ -580,6 +594,7 @@ bool apply_rule_to_state(Monitor *m, const ConfigMonitorRule *rule,
 	} else {
 		disable_adaptive_sync(m, state);
 	}
+	wlr_output_state_set_enabled(state, !m->prefer_disable);
 	wlr_output_state_set_scale(state, rule->scale);
 	wlr_output_state_set_transform(state, rule->rr);
 	return mode_set;
@@ -659,6 +674,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 	enum wl_output_transform rr = WL_OUTPUT_TRANSFORM_NORMAL;
 	wlr_output_state_set_scale(&pending, scale);
 	wlr_output_state_set_transform(&pending, rr);
+	wlr_output_state_set_enabled(&pending, true);
 
 	for (ji = 0; ji < config.monitor_rules_count; ji++) {
 		r = &config.monitor_rules[ji];
@@ -699,11 +715,8 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 	wlr_output_state_init(&state);
 
 	// Enable/disable
-	if (m->prefer_disable) {
-		wlr_output_state_set_enabled(&state, false);
-	} else {
-		wlr_output_state_set_enabled(&state, true);
-	}
+	if (pending.committed & WLR_OUTPUT_STATE_ENABLED)
+		wlr_output_state_set_enabled(&state, pending.enabled);
 
 	// Mode setting
 	if (pending.committed & WLR_OUTPUT_STATE_MODE) {
@@ -883,7 +896,6 @@ void handle_output_destroy(struct wl_listener *listener, void *data) {
 		m->skip_frame_timeout = NULL;
 	}
 	m->wlr_output->data = NULL;
-	xdg_output_cleanup_output(m->wlr_output);
 
 	cleanup_monitor_dwindle(m);
 	cleanup_monitor_scroller(m);
@@ -895,13 +907,7 @@ void handle_output_destroy(struct wl_listener *listener, void *data) {
 	free(m);
 }
 
-void set_selected_monitor(Monitor *m) {
-	server.selected_monitor = m;
-#ifdef XWAYLAND
-	/* Keep the X11 primary output on the current monitor. */
-	xwayland_primary_set(m);
-#endif
-}
+void set_selected_monitor(Monitor *m) { server.selected_monitor = m; }
 
 void monitor_close(Monitor *m) {
 	/* update selected_monitor if needed and
@@ -1087,7 +1093,7 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 			if (client_is_x11(c) && c->mon == m) {
 				xwayland_apply_scale(c);
 				if (client_surface(c)->mapped)
-					resize(c, c->geom, 0);
+					resize(c, c->geom, (ResizeOpts){.interact = 0});
 			}
 #endif
 			// floating window position auto adjust the change of monitor
@@ -1097,7 +1103,7 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 				c->geom.y += mon_pos_offsety;
 				c->float_geom = c->geom;
 				if (VISIBLEON(c, m))
-					resize(c, c->geom, 1);
+					resize(c, c->geom, (ResizeOpts){.interact = 1});
 			}
 
 			// restore window to old monitor
@@ -1133,7 +1139,7 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 		arrange(m, false, false);
 		/* make sure fullscreen clients have the right size */
 		if ((c = client_focus_top(m)) && c->isfullscreen)
-			resize(c, m->m, 0);
+			resize(c, m->m, (ResizeOpts){.interact = 0});
 
 		config_head->state.x = m->m.x;
 		config_head->state.y = m->m.y;
@@ -1152,7 +1158,7 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 			if (c->tags == 0 && !c->is_in_scratchpad) {
 				c->tags = server.selected_monitor
 							  ->tagset[server.selected_monitor->seltags];
-				set_size_per(server.selected_monitor, c);
+				set_size_per(server.selected_monitor, c, false);
 			}
 		}
 		client_focus(client_focus_top(server.selected_monitor), 1);
@@ -1178,9 +1184,9 @@ void handle_output_layout_change(struct wl_listener *listener, void *data) {
 	xdg_output_update_all();
 
 #ifdef XWAYLAND
-	/* XWayland's output list may have changed (hotplug or DPMS). Reapply the
-	 * primary output once; the helper itself is single-flight. */
-	xwayland_primary_invalidate();
+	/* XWayland's output list may have changed (hotplug, DPMS or a config
+	 * reload). Reapply the primary output selected by the monitor rules. */
+	xwayland_primary_update();
 #endif
 }
 

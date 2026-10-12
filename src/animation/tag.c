@@ -5,6 +5,7 @@
 #include "mango/layout/layout.h"
 #include "mango/manage/client.h"
 #include "mango/manage/monitor.h"
+#include "mango/manage/tab.h"
 
 void set_tagin_animation(Monitor *m, Client *c) {
 	if (c->animation.running) {
@@ -52,6 +53,8 @@ void set_tagin_animation(Monitor *m, Client *c) {
 }
 
 void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
+	c->tag_visible = true;
+
 	bool was_enabled = c->scene->node.enabled;
 	bool in_place = was_enabled && !c->animation.running &&
 					wlr_box_equal(&c->animation.current, &c->geom);
@@ -61,11 +64,7 @@ void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
 
 	if (!ISTILED(c) || (!c->is_clip_to_hide || !is_scroller_layout(c->mon))) {
 		c->is_clip_to_hide = false;
-		wlr_scene_node_set_enabled(&c->scene->node, true);
-		/* In overview the real surface tree is replaced by the card tree, so it
-		 * stays disabled. */
-		if (!c->ov_card_tree)
-			wlr_scene_node_set_enabled(&c->scene_surface->node, true);
+		client_update_visibility(c);
 	}
 
 	/* Scratchpad clients slide in from above the monitor when shown */
@@ -74,7 +73,9 @@ void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
 		c->animation.tag_from_rule = false;
 		c->animation.tagouted = false;
 		/* Reverse an in-flight hide instead of restarting from the top. */
-		bool reversing = c->animation.tagouting && c->animation.running;
+		bool reversing =
+			c->animation.tagouting && c->animation.running &&
+			!wlr_box_equal(&c->animation.current, &c->animation.initial);
 		c->animation.tagouting = false;
 		if (client_animations_enabled(c)) {
 			c->animation.tagining = true;
@@ -90,7 +91,7 @@ void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
 			c->animainit_geom.x = c->animation.current.x;
 			c->animainit_geom.y = c->animation.current.y;
 		}
-		resize_apply(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
+		resize(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
 		return;
 	}
 
@@ -107,7 +108,7 @@ void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
 			c->animainit_geom.x = c->animation.current.x;
 			c->animainit_geom.y = c->animation.current.y;
 		}
-		resize_apply(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
+		resize(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
 		return;
 	}
 
@@ -122,7 +123,7 @@ void set_arrange_visible(Monitor *m, Client *c, bool want_animation) {
 	c->animation.tag_from_rule = false;
 	c->animation.tagouting = false;
 	c->animation.tagouted = false;
-	resize_apply(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
+	resize(c, c->geom, (ResizeOpts){.skip_ov_enter_anim = true});
 }
 
 void set_tagout_animation(Monitor *m, Client *c) {
@@ -150,7 +151,7 @@ void set_tagout_animation(Monitor *m, Client *c) {
 									   c->geom.y - c->mon->m.height)
 						   : c->animation.current.y;
 
-		resize(c, c->geom, 0);
+		resize(c, c->geom, (ResizeOpts){.interact = 0});
 	} else {
 		c->pending = c->geom;
 		c->pending.x = config.tag_animation_direction == VERTICAL
@@ -161,15 +162,17 @@ void set_tagout_animation(Monitor *m, Client *c) {
 						   ? MANGO_MAX(c->mon->m.y + c->mon->m.height,
 									   c->geom.y + c->mon->m.height)
 						   : c->animation.current.y;
-		resize(c, c->geom, 0);
+		resize(c, c->geom, (ResizeOpts){.interact = 0});
 	}
 }
 void set_arrange_hidden(Monitor *m, Client *c, bool want_animation) {
+	c->tag_visible = false;
+
 	/* In overview every tag window must show its card and must not be disabled
 	 * by the hiding logic. */
 	if (c->ov_card_tree) {
 		c->is_clip_to_hide = false;
-		wlr_scene_node_set_enabled(&c->scene->node, true);
+		client_update_visibility(c);
 		c->animation.running = false;
 		c->animation.tagining = false;
 		c->animation.tagouting = false;
@@ -183,12 +186,12 @@ void set_arrange_hidden(Monitor *m, Client *c, bool want_animation) {
 			c->animation.tagining = false;
 			c->pending = c->geom;
 			c->pending.y = c->mon->m.y - c->geom.height;
-			resize(c, c->geom, 0);
+			resize(c, c->geom, (ResizeOpts){.interact = 0});
 		} else {
 			c->animation.running = false;
 			c->animation.tagouting = false;
 			c->animation.tagining = false;
-			wlr_scene_node_set_enabled(&c->scene->node, false);
+			client_update_visibility(c);
 			c->animainit_geom = c->current = c->pending = c->animation.current =
 				c->geom;
 		}
@@ -198,25 +201,26 @@ void set_arrange_hidden(Monitor *m, Client *c, bool want_animation) {
 	/* Special workspace windows should animate out or hide when special
 	 * workspace is not active */
 	if (c->tags & TAG0_MASK) {
-		if (want_animation && client_animations_enabled(c) &&
+		if (want_animation && !m->isoverview && client_animations_enabled(c) &&
 			!c->animation.tagouted) {
 			c->animation.tagouting = true;
 			c->animation.tagining = false;
 			c->pending = c->geom;
 			c->pending.y = c->mon->m.y - c->geom.height;
-			resize(c, c->geom, 0);
+			resize(c, c->geom, (ResizeOpts){.interact = 0});
 		} else {
 			c->animation.running = false;
 			c->animation.tagouting = false;
 			c->animation.tagining = false;
-			wlr_scene_node_set_enabled(&c->scene->node, false);
+			client_update_visibility(c);
 			c->animainit_geom = c->current = c->pending = c->animation.current =
 				c->geom;
 		}
 		return;
 	}
 
-	if ((c->tags & (1 << (m->pertag->prevtag - 1))) &&
+	if (!c->is_tab_hidden && !c->animation.tagouted &&
+		(c->tags & (1 << (m->pertag->prevtag - 1))) &&
 		m->pertag->prevtag != 0 && m->pertag->curtag != 0 &&
 		client_animations_enabled(c)) {
 		c->animation.tagouting = true;
@@ -226,7 +230,8 @@ void set_arrange_hidden(Monitor *m, Client *c, bool want_animation) {
 		c->animation.running = false;
 		c->animation.tagining = false;
 		c->animation.tagouting = false;
-		wlr_scene_node_set_enabled(&c->scene->node, false);
+		c->animation.tagouted = true;
+		client_update_visibility(c);
 		c->animainit_geom = c->current = c->pending = c->animation.current =
 			c->geom;
 	}

@@ -25,10 +25,13 @@ void mango_error_impl(bool log, enum wlr_log_importance verbosity,
 					  const char *file, int line, const char *fmt, ...)
 	__attribute__((format(printf, 5, 6)));
 
+void mango_error_untagged(enum wlr_log_importance verbosity, const char *fmt,
+						  ...) __attribute__((format(printf, 2, 3)));
+
 /** Prepend the source file/line info to log messages; usage is the same as the
  * original mango_error. */
 #define mango_error(log, verbosity, fmt, ...)                                  \
-	mango_error_impl((log), (verbosity), __FILE__, __LINE__, (fmt),            \
-					 ##__VA_ARGS__)
+	mango_error_impl((log), (verbosity), __FILE__, __LINE__,                   \
+					 (fmt), ##__VA_ARGS__)
 
 #endif

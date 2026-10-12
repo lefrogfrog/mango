@@ -3,6 +3,7 @@
 
 #include "mango/animation/common.h"
 #include "mango/common/types.h"
+#include <stdbool.h>
 
 bool client_is_ignore_output_clip(Client *c);
 struct ivec2 compute_edge_offsets(Client *c);
@@ -26,7 +27,7 @@ void scene_buffer_apply_effect(struct wlr_scene_buffer *buffer, int32_t sx,
 void buffer_set_effect(Client *c, BufferData data);
 
 void client_draw_shadow(Client *c, struct ivec2 offsets);
-void client_draw_groupbar(Client *c, struct ivec2 offsets);
+void client_draw_group_bar(Client *c, struct ivec2 offsets);
 void global_draw_group_bar(Client *c, int32_t x, int32_t y, int32_t width,
 						   int32_t height);
 void client_draw_shield(Client *c, struct ivec2 clip_box);
@@ -58,10 +59,12 @@ typedef struct ResizeOpts {
 	bool interact; // Interactive resize (window resized by mouse drag).
 	bool skip_ov_enter_anim; // Pre-arrangement stage: skip the overview enter
 							 // zoom.
+	bool force_configure; // Must be sent even if the box did not change (client
+						  // ConfigureRequest).
+	uint32_t drag_edge;
 } ResizeOpts;
 
-void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts);
-void resize(Client *c, struct wlr_box geo, int32_t interact);
+void resize(Client *c, struct wlr_box geo, ResizeOpts opts);
 bool client_draw_fadeout_frame(Client *c);
 void client_set_focused_opacity_animation(Client *c);
 void client_set_unfocused_opacity_animation(Client *c);

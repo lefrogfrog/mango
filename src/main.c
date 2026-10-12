@@ -2,10 +2,13 @@
  * See LICENSE file for copyright and license details.
  */
 #include "mango/animation/common.h"
+#include "mango/common/input-event-codes.h"
 #include "mango/common/log.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
-#include "mango/config/parse_config.h"
+#include "mango/config/error_nag.h"
+#include "mango/config/parse.h"
+#include "mango/config/watcher.h"
 #include "mango/dispatch/bind.h"
 #include "mango/draw/text-node.h"
 #include "mango/ext-protocol/ext-workspace.h"
@@ -29,7 +32,6 @@
 #include <getopt.h>
 #include <libinput.h>
 #include <limits.h>
-#include <linux/input-event-codes.h>
 #include <pthread.h>
 #include <scenefx/render/fx_renderer/fx_renderer.h>
 #include <scenefx/types/fx/blur_data.h>
@@ -40,6 +42,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -126,6 +129,41 @@
 void handle_quit_signal(int32_t signo);
 void unset_activation_env(void);
 
+/* Raise the soft NOFILE limit to the hard limit at startup, and restore it in
+ * forked children so they keep the original limit. */
+static struct rlimit original_nofile_rlimit = {0};
+
+static void restore_nofile_limit(void) {
+	if (original_nofile_rlimit.rlim_cur == 0)
+		return;
+	if (setrlimit(RLIMIT_NOFILE, &original_nofile_rlimit) != 0)
+		mango_error(true, WLR_ERROR,
+					"Failed to restore max open files limit: "
+					"setrlimit(NOFILE) failed");
+}
+
+static void increase_nofile_limit(void) {
+	if (getrlimit(RLIMIT_NOFILE, &original_nofile_rlimit) != 0) {
+		mango_error(true, WLR_ERROR,
+					"Failed to bump max open files limit: "
+					"getrlimit(NOFILE) failed");
+		return;
+	}
+
+	struct rlimit new_rlimit = original_nofile_rlimit;
+	new_rlimit.rlim_cur = new_rlimit.rlim_max;
+	if (setrlimit(RLIMIT_NOFILE, &new_rlimit) != 0) {
+		mango_error(true, WLR_ERROR,
+					"Failed to bump max open files limit: "
+					"setrlimit(NOFILE) failed");
+		mango_error(true, WLR_INFO, "Running with %d max open files",
+					(int)original_nofile_rlimit.rlim_cur);
+		return;
+	}
+
+	pthread_atfork(NULL, NULL, restore_nofile_limit);
+}
+
 void handle_signal(int32_t signo) {
 	if (signo == SIGCHLD)
 		while (waitpid(-1, NULL, WNOHANG) > 0)
@@ -193,8 +231,10 @@ void cleanup_listeners(void) {
 		wl_list_remove(&server.drm_lease_request_listener.link);
 	}
 #ifdef XWAYLAND
-	wl_list_remove(&server.new_xwayland_surface_listener.link);
-	wl_list_remove(&server.xwayland_ready_listener.link);
+	if (server.xwayland) {
+		wl_list_remove(&server.new_xwayland_surface_listener.link);
+		wl_list_remove(&server.xwayland_ready_listener.link);
+	}
 #endif
 }
 
@@ -204,6 +244,8 @@ void cleanup(void) {
 	unset_activation_env();
 
 	ipc_cleanup();
+	config_watcher_destroy();
+	config_error_nag_destroy();
 	cleanup_listeners();
 #ifdef XWAYLAND
 	wlr_xwayland_destroy(server.xwayland);
@@ -308,7 +350,18 @@ void unset_activation_env(void) {
 		goto cleanup;
 	}
 
-	mango_exec("systemctl --user stop graphical-session.target");
+	/* These are fired off asynchronously: doing them synchronously (blocking
+	 * on the child) deadlocks when mango itself belongs to the systemd user
+	 * session, because stopping graphical-session.target then waits for mango
+	 * to exit while mango waits for the command to finish. */
+	char *cmd0 = string_printf(
+		"systemctl --user --no-block stop graphical-session.target");
+	if (!cmd0) {
+		mango_error(true, WLR_ERROR, "Failed to allocate command string");
+		goto cleanup;
+	}
+	spawn_shell(&(Arg){.v = cmd0});
+	free(cmd0);
 
 	char *cmd1 =
 		string_printf("systemctl --user unset-environment %s", env_keys);
@@ -316,7 +369,7 @@ void unset_activation_env(void) {
 		mango_error(true, WLR_ERROR, "Failed to allocate command string");
 		goto cleanup;
 	}
-	mango_exec(cmd1);
+	spawn_shell(&(Arg){.v = cmd1});
 	free(cmd1);
 
 	char *cmd2 =
@@ -325,7 +378,7 @@ void unset_activation_env(void) {
 		mango_error(true, WLR_ERROR, "Failed to allocate command string");
 		goto cleanup;
 	}
-	mango_exec(cmd2);
+	spawn_shell(&(Arg){.v = cmd2});
 	free(cmd2);
 
 cleanup:
@@ -448,10 +501,12 @@ void setup(void) {
 	server.display = wl_display_create();
 
 	wl_display_set_default_max_buffer_size(server.display, 1024 * 1024);
+	wl_display_set_global_filter(server.display, mango_global_filter, NULL);
 
 	server.event_loop = wl_display_get_event_loop(server.display);
 
 	ipc_init(server.event_loop);
+	config_watcher_init(server.event_loop);
 
 	server.tablet_manager = wlr_tablet_v2_create(server.display);
 	/* The backend is a wlroots feature which abstracts the underlying input
@@ -882,12 +937,14 @@ void setup(void) {
 	server.sync_keymap = wl_event_loop_add_timer(
 		wl_display_get_event_loop(server.display), keyboard_sync_keymap, NULL);
 #endif
+	config_error_nag_init();
 }
 
 int32_t main(int32_t argc, char *argv[]) {
 	char *startup_cmd = NULL;
 	int32_t c;
 	int readiness_fd = 0;
+	bool check_config = false;
 
 	while ((c = getopt(argc, argv, "s:c:r:hdvp")) != -1) {
 		if (c == 's') {
@@ -901,7 +958,7 @@ int32_t main(int32_t argc, char *argv[]) {
 			snprintf(server.cli_config_path, sizeof(server.cli_config_path),
 					 "%s", optarg);
 		} else if (c == 'p') {
-			return parse_config() ? EXIT_SUCCESS : EXIT_FAILURE;
+			check_config = true;
 		} else if (c == 'r') {
 			readiness_fd = atoi(optarg);
 			if (readiness_fd < 3) {
@@ -913,6 +970,11 @@ int32_t main(int32_t argc, char *argv[]) {
 	}
 	if (optind < argc)
 		goto usage;
+
+	if (check_config)
+		return parse_config() ? EXIT_SUCCESS : EXIT_FAILURE;
+
+	increase_nofile_limit();
 
 	/* Wayland requires XDG_RUNTIME_DIR for creating its communications
 	 * socket

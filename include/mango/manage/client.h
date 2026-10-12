@@ -3,8 +3,10 @@
 
 #include "mango/animation/common.h"
 #include "mango/common/types.h"
-#include "mango/config/parse_config.h"
+#include "mango/config/parse.h"
 #include "mango/draw/dim-node.h"
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <wayland-server-core.h>
@@ -19,7 +21,8 @@ enum {
 	Snapshot,
 	XdgPopup,
 	XdgImPopup,
-	GroupBar
+	GroupBar,
+	TabBar
 }; /* client types */
 
 #ifdef XWAYLAND
@@ -80,7 +83,6 @@ struct Client {
 	struct wlr_scene_surface *image_capture_scene_surface;
 	struct wlr_scene_tree *overview_scene_surface;
 	MangoJumpLabel *jump_label_node;
-	MangoGroupBar *group_bar;
 	MangoDimNode *dim_node;
 	struct wl_list link;
 	struct wl_list flink;
@@ -111,12 +113,8 @@ struct Client {
 	struct wlr_box xwl_clip; /* Most recent logical clip area of the XWayland
 								root surface. */
 	bool xwl_clip_active;	 /* Whether source_box clipping is active. */
-	/*
-	 * X11 configure deduplication: until the client acks, surface->current is
-	 * not updated, so repeated arrange calls resend identical configures and
-	 * force clients to re-render/re-upload. Record the most recently requested
-	 * physical size/position here and skip configure if it has not changed.
-	 */
+	/* Last physical box asked from XWayland, to skip identical repeats. The
+	 * record is dropped when the client asks to change itself or on (re)map. */
 	int32_t xwl_req_x, xwl_req_y, xwl_req_w, xwl_req_h;
 	bool xwl_req_valid;
 #endif
@@ -127,7 +125,7 @@ struct Client {
 	uint32_t configure_serial;
 	struct wlr_foreign_toplevel_handle_v1 *foreign_toplevel;
 	int32_t isfloating, isurgent, isfullscreen, isfakefullscreen,
-		need_float_size_reduce, isminimized, isoverlay, isnosizehint,
+		need_float_size_reduce, isminimized, isoverlay, no_size_hint,
 		ignore_maximize, ignore_minimize, idleinhibit_when_focus,
 		vrr_only_fullscreen, force_render, activation_bypass;
 	int32_t ismaximizescreen;
@@ -159,10 +157,10 @@ struct Client {
 	int32_t iscustom_scroller_proportion;
 	int32_t iscustom_scroller_proportion_single;
 	int32_t isglobal;
-	int32_t isnoborder;
-	int32_t isnoshadow;
-	int32_t isnoradius;
-	int32_t isnoanimation;
+	int32_t no_border;
+	int32_t no_shadow;
+	int32_t no_radius;
+	int32_t no_animation;
 	int32_t isopensilent;
 	int32_t istagsilent;
 	int32_t iskilling;
@@ -171,12 +169,12 @@ struct Client {
 	bool is_pending_open_animation;
 	bool is_restoring_from_ov;
 	float scroller_proportion;
-	float stack_proportion;
-	float old_stack_proportion;
+	float scroller_stack_proportion;
+	float scroller_old_stack_proportion;
 	bool need_output_flush;
 	struct mango_animation animation;
 	struct mango_opacity_animation opacity_animation;
-	int32_t isterm, noswallow;
+	int32_t isterm, no_swallow;
 	int32_t allow_csd;
 	int32_t force_fakemaximize;
 	int32_t force_tiled_state;
@@ -187,18 +185,19 @@ struct Client {
 	bool scratchpad_switching_mon;
 	bool scratchpad_tagin;
 	bool fake_no_border;
-	int32_t nofocus;
-	int32_t nofadein;
-	int32_t nofadeout;
+	int32_t no_focus;
+	int32_t no_fade_in;
+	int32_t no_fade_out;
 	int32_t no_force_center;
 	int32_t isunglobal;
 	float focused_opacity;
 	float unfocused_opacity;
 	char oldmonname[128];
-	int32_t noblur;
+	int32_t no_blur;
 	float blur_opacity;
 	struct wlr_ext_foreign_toplevel_handle_v1 *ext_foreign_toplevel;
 	double master_mfact_per, master_inner_per, stack_inner_per;
+	double master_size_weight, stack_size_weight;
 	double old_master_mfact_per, old_master_inner_per, old_stack_inner_per;
 	double old_scroller_pproportion;
 	bool ismaster;
@@ -223,10 +222,31 @@ struct Client {
 	int32_t grid_col_idx;
 	int32_t grid_row_idx;
 	uint32_t id;
+	/* manual group chain */
+	MangoBarDecoration *group_bar;
 	Client *group_prev;
 	Client *group_next;
-	bool isgroupfocusing;
+	bool is_group_focus;
+
+	/* auto tab chain; state kept fully separate from group */
+	MangoBarDecoration *tab_bar;
+	Client *tab_prev;
+	Client *tab_next;
+	bool is_tab_focus;
+	bool is_tab_hidden;
+
+	/* arrange verdict: window belongs to the current view */
+	bool tag_visible;
+	/* temporary override while snapshotting a closing window */
+	bool snapshot_temp_visible;
+	/* per-frame: surface clipped away by the draw path */
+	bool is_surface_hidden;
 };
+
+#define CLIENT_GROUP_PREV_OFF offsetof(Client, group_prev)
+#define CLIENT_GROUP_NEXT_OFF offsetof(Client, group_next)
+#define CLIENT_TAB_PREV_OFF offsetof(Client, tab_prev)
+#define CLIENT_TAB_NEXT_OFF offsetof(Client, tab_next)
 
 void client_update_geometry(Client *c);
 void client_init_xwayland(Client *c);
@@ -295,10 +315,12 @@ void client_set_scale(struct wlr_surface *s, float scale);
 void client_update_xwayland_clip(Client *c, struct wlr_box *clip);
 /* Syncs the dest_size (logical size) of the XWayland root surface. */
 void client_update_xwayland_dest_size(Client *c);
-uint32_t client_set_size(Client *c, uint32_t width, uint32_t height);
+uint32_t client_set_size(Client *c, uint32_t width, uint32_t height,
+						 bool force_configure);
 void client_set_minimized(Client *c, bool minimize_window);
 void client_set_maximized(Client *c, bool maximized);
 void client_set_tiled(Client *c, uint32_t edges);
+void client_sync_tiled_hint(Client *c);
 
 int32_t client_should_ignore_focus(Client *c);
 int32_t client_is_x11_popup(Client *c);
@@ -338,7 +360,7 @@ void apply_rule_properties(Client *c, const ConfigWinRule *r);
 void set_float_malposition(Client *tc);
 void client_reset_mon_tags(Client *c, Monitor *mon, uint32_t newtags);
 void check_match_tag_floating_rule(Client *c, Monitor *mon);
-void client_apply_rules(Client *c);
+void client_apply_rules(Client *c, Monitor **rule_mon, uint32_t *rule_tags);
 void apply_window_snap(Client *c);
 /*
  * Client management: window lifecycle, rules, focus, tiled/floating/fullscreen
@@ -362,6 +384,8 @@ void handle_client_request_minimize(struct wl_listener *listener, void *data);
 void handle_client_set_title(struct wl_listener *listener, void *data);
 void handle_client_activation_request(struct wl_listener *listener, void *data);
 void pending_kill_client(Client *c);
+bool client_blur_uses_wallpaper(Client *c);
+void client_sync_blur_optimized(Client *c);
 void iter_xdg_scene_buffers(struct wlr_scene_buffer *buffer, int32_t sx,
 							int32_t sy, void *user_data);
 void scene_buffer_apply_opacity(struct wlr_scene_buffer *buffer, int32_t sx,
@@ -410,22 +434,39 @@ void client_swap_layout_properties(Client *c1, Client *c2);
 void client_swap_monitors_and_tags(Client *c1, Client *c2);
 void finish_exchange_arrange_and_focus(Client *c1, Client *c2, Monitor *m1,
 									   Monitor *m2);
-void client_tile_resize(Client *c, struct wlr_box geo, int32_t interact);
+void client_tile_resize(Client *c, struct wlr_box geo, int32_t interact,
+						const LayoutContext *ctx);
 uint32_t generate_client_id(void);
 void client_pending_force_kill(Client *c);
 void client_add_jump_label_node(Client *c);
 uint32_t client_target_layer(Client *c);
 void client_sync_layer(Client *c);
 void client_add_group_bar(Client *c);
+bool client_wants_group_bar(Client *c);
+void client_update_group_bar_title(Client *c);
+void client_apply_group_bar_config(Client *c);
+void client_remove_group_bar(Client *c);
+bool client_group_swap_focus(Client *c);
 void client_focus_group_member(Client *c);
 void client_check_tab_node_visible(Client *c);
 void client_raise_group(Client *c);
 void client_reparent_group(Client *c);
-void client_handle_decorate_click(MangoGroupBar *gb);
+void client_handle_decorate_click(MangoBarDecoration *gb);
 void client_set_group_mon(Client *c, Monitor *m);
 void client_set_group_config(Client *c);
 void client_group_detach(Client *c);
 void client_group_replace(Client *old, Client *new);
+Client *client_group_active(Client *c);
+Client *client_group_head(Client *c);
+Client *client_group_focused(Client *c);
+bool client_is_group_member(const Client *c);
+
+Client *client_chain_head(Client *c, size_t prev_off);
+void client_chain_unlink(Client *c, size_t prev_off, size_t next_off);
+
+bool client_gesture_driven(const Client *c);
+bool client_should_visible(Client *c);
+void client_update_visibility(Client *c);
 void mango_surface_frame_done(struct wlr_surface *surface, int sx, int sy,
 							  void *data);
 // Feeds frame callbacks to all surfaces (including subsurfaces) of hidden

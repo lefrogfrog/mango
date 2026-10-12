@@ -7,6 +7,7 @@
 #include "mango/manage/client.h"
 #include "mango/manage/misc.h"
 #include "mango/manage/monitor.h"
+#include "mango/manage/tab.h"
 #include "mango/overview/overview.h"
 #include <math.h>
 #include <scenefx/types/wlr_scene.h>
@@ -16,14 +17,10 @@
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/util/edges.h>
 #ifdef XWAYLAND
 #include <wlr/xwayland.h>
 #endif
-
-static bool client_gesture_driven(const Client *c) {
-	return server.gesture_drive_active && c &&
-		   c->mon == server.gesture_drive_mon;
-}
 
 static int32_t client_open_animation_type(const Client *c) {
 	return c->animation_type_open != ANIM_TYPE_UNSET
@@ -38,6 +35,8 @@ static int32_t client_close_animation_type(const Client *c) {
 }
 
 bool client_animations_enabled(const Client *c) {
+	if (c && c->no_animation)
+		return false;
 	if (config.animations)
 		return true;
 	return client_gesture_driven(c);
@@ -148,14 +147,18 @@ void set_client_open_animation(Client *c, struct wlr_box geo) {
 	int32_t vertical, vertical_value;
 	int32_t special_direction;
 	int32_t center_x, center_y;
+	int32_t type = client_open_animation_type(c);
 
-	if (client_open_animation_type(c) == ANIM_TYPE_FADE) {
+	if (type == ANIM_TYPE_NONE || c->animation.duration == 0) {
+		c->animainit_geom = geo;
+		return;
+	} else if (type == ANIM_TYPE_FADE) {
 		c->animainit_geom.width = geo.width;
 		c->animainit_geom.height = geo.height;
 		c->animainit_geom.x = geo.x;
 		c->animainit_geom.y = geo.y;
 		return;
-	} else if (client_open_animation_type(c) == ANIM_TYPE_ZOOM) {
+	} else if (type == ANIM_TYPE_ZOOM) {
 		c->animainit_geom.width = geo.width * config.zoom_initial_ratio;
 		c->animainit_geom.height = geo.height * config.zoom_initial_ratio;
 		c->animainit_geom.x = geo.x + (geo.width - c->animainit_geom.width) / 2;
@@ -300,7 +303,7 @@ void buffer_set_effect(Client *c, BufferData data) {
 							c->mon->visible_tiling_clients == 1))
 		data.corner_location = corner_radii_none();
 
-	if (config.blur && !c->noblur)
+	if (config.blur && !c->no_blur)
 		wlr_scene_blur_set_corner_radii(c->blur, data.corner_location);
 
 	/* Overview cards get rounded corners directly. */
@@ -314,7 +317,7 @@ void buffer_set_effect(Client *c, BufferData data) {
 }
 
 void client_draw_shadow(Client *c, struct ivec2 offsets) {
-	if (c->iskilling || !client_surface(c)->mapped || c->isnoshadow)
+	if (c->iskilling || !client_surface(c)->mapped || c->no_shadow)
 		return;
 
 	if (!config.shadows || c->isfullscreen ||
@@ -403,22 +406,29 @@ void client_draw_shadow(Client *c, struct ivec2 offsets) {
 
 	wlr_scene_shadow_set_clipped_region(c->shadow, clipped_region);
 }
-void client_draw_groupbar(Client *c, struct ivec2 offsets) {
+
+void client_draw_group_bar(Client *c, struct ivec2 offsets) {
 	if (!c || !c->group_bar)
 		return;
 
-	if (!c->group_next && !c->group_prev) {
+	if (!client_wants_group_bar(c)) {
 		if (c->group_bar->scene->node.enabled)
 			wlr_scene_node_set_enabled(&c->group_bar->scene->node, false);
 		return;
 	}
 
-	Client *head = c;
-	while (head->group_prev)
-		head = head->group_prev;
+	/* Owner hidden by tab: hide the whole strip, otherwise its nodes (they are
+	 * not children of the window) would float over the visible window. */
+	if (c->is_tab_hidden) {
+		for (Client *cur = client_group_head(c); cur; cur = cur->group_next) {
+			if (cur->group_bar)
+				wlr_scene_node_set_enabled(&cur->group_bar->scene->node, false);
+		}
+		return;
+	}
 
 	int count = 0;
-	Client *cur = head;
+	Client *cur = client_group_head(c);
 	while (cur) {
 		count++;
 		cur = cur->group_next;
@@ -450,7 +460,7 @@ void client_draw_groupbar(Client *c, struct ivec2 offsets) {
 	}
 
 	if (tw <= 0 || th <= 0) {
-		cur = head;
+		cur = client_group_head(c);
 		while (cur) {
 			if (cur->group_bar)
 				wlr_scene_node_set_enabled(&cur->group_bar->scene->node, false);
@@ -464,7 +474,7 @@ void client_draw_groupbar(Client *c, struct ivec2 offsets) {
 	int32_t bar_w = tw / count;
 	int32_t rem = tw % count;
 	int32_t x = tab_x;
-	cur = head;
+	cur = client_group_head(c);
 
 	for (int i = 0; i < count && cur; i++) {
 		int32_t w = bar_w + (i < rem ? 1 : 0);
@@ -576,7 +586,7 @@ void client_draw_blur(Client *c, struct ivec2 clip_box) {
 	int32_t blur_width = 0;
 	int32_t blur_height = 0;
 
-	if (config.blur && !c->noblur) {
+	if (config.blur && !c->no_blur) {
 
 		if (client_is_ignore_output_clip(c)) {
 			blur_x = c->bw;
@@ -611,7 +621,7 @@ void global_draw_group_bar(Client *c, int32_t x, int32_t y, int32_t width,
 		return;
 
 	wlr_scene_node_set_position(&c->group_bar->scene->node, x, y);
-	mango_group_bar_set_size(c->group_bar, width, height);
+	mango_bar_decoration_set_size(c->group_bar, width, height);
 }
 void client_draw_split_border(Client *c, bool hit_no_border,
 							  struct ivec2 offsets) {
@@ -777,11 +787,11 @@ struct ivec2 clip_to_hide(Client *c, struct wlr_box *clip_box,
 	if ((clip_box->width + bw <= 0 || clip_box->height + bw <= 0) &&
 		(ISSCROLLTILED(c) || c->animation.tagouting || c->animation.tagining)) {
 		c->is_clip_to_hide = true;
-		wlr_scene_node_set_enabled(&c->scene->node, false);
+		client_update_visibility(c);
 	} else if (c->is_clip_to_hide &&
 			   (VISIBLEON(c, c->mon) || client_gesture_driven(c))) {
 		c->is_clip_to_hide = false;
-		wlr_scene_node_set_enabled(&c->scene->node, true);
+		client_update_visibility(c);
 	}
 
 	return offset;
@@ -812,6 +822,15 @@ void client_set_drop_area(Client *c) {
 
 	if (client_width <= 0 || client_height <= 0) {
 		wlr_scene_node_set_enabled(&c->droparea->node, false);
+		return;
+	}
+
+	if (server.drop_to_group && server.drop_client == c) {
+		if (!first_draw && c->drop_direction == UNDIR)
+			return;
+		c->drop_direction = UNDIR;
+		wlr_scene_node_set_position(&c->droparea->node, bw, bw);
+		wlr_scene_rect_set_size(c->droparea, client_width, client_height);
 		return;
 	}
 
@@ -998,7 +1017,8 @@ void client_apply_clip(Client *c, float factor) {
 		/* Decorations are drawn against the card geometry. */
 		client_draw_border(c, offsets);
 		client_draw_shadow(c, offsets);
-		client_draw_groupbar(c, offsets);
+		client_draw_group_bar(c, offsets);
+		client_draw_tabbar(c, offsets);
 		client_draw_blur(c, surface_clip_offset);
 		client_draw_shield(c, surface_clip_offset);
 		client_draw_dim(c, surface_clip_offset);
@@ -1031,18 +1051,16 @@ void client_apply_clip(Client *c, float factor) {
 
 		client_draw_border(c, offsets);
 		client_draw_shadow(c, offsets);
-		client_draw_groupbar(c, offsets);
+		client_draw_group_bar(c, offsets);
+		client_draw_tabbar(c, offsets);
 		client_draw_blur(c, surface_clip_offset);
 		client_draw_shield(c, surface_clip_offset);
 		client_draw_dim(c, surface_clip_offset);
 
-		if (clip_box.width <= 0 || clip_box.height <= 0) {
-			should_render_client_surface = false;
-			wlr_scene_node_set_enabled(&c->scene_surface->node, false);
-		} else {
-			should_render_client_surface = true;
-			wlr_scene_node_set_enabled(&c->scene_surface->node, true);
-		}
+		should_render_client_surface =
+			clip_box.width > 0 && clip_box.height > 0;
+		c->is_surface_hidden = !should_render_client_surface;
+		client_update_visibility(c);
 
 		if (!should_render_client_surface)
 			return;
@@ -1085,7 +1103,8 @@ void client_apply_clip(Client *c, float factor) {
 
 	client_draw_border(c, offsets);
 	client_draw_shadow(c, offsets);
-	client_draw_groupbar(c, offsets);
+	client_draw_group_bar(c, offsets);
+	client_draw_tabbar(c, offsets);
 	client_draw_shield(c, surface_clip_offset);
 	client_draw_dim(c, surface_clip_offset);
 	client_draw_blur(c, surface_clip_offset);
@@ -1098,13 +1117,9 @@ void client_apply_clip(Client *c, float factor) {
 	else
 		client_update_xwayland_dest_size(c);
 
-	if (clip_box.width <= 0 || clip_box.height <= 0) {
-		should_render_client_surface = false;
-		wlr_scene_node_set_enabled(&c->scene_surface->node, false);
-	} else {
-		should_render_client_surface = true;
-		wlr_scene_node_set_enabled(&c->scene_surface->node, true);
-	}
+	should_render_client_surface = clip_box.width > 0 && clip_box.height > 0;
+	c->is_surface_hidden = !should_render_client_surface;
+	client_update_visibility(c);
 
 	if (!should_render_client_surface)
 		return;
@@ -1183,7 +1198,7 @@ void fadeout_client_animation_next_tick(Client *c) {
 					 (opacity_eased_progress * config.fadeout_begin_opacity);
 	double opacity = MANGO_MAX(percent, 0);
 
-	if (config.animation_fade_out && !c->nofadeout)
+	if (config.animation_fade_out && !c->no_fade_out)
 		wlr_scene_node_for_each_buffer(&c->scene->node,
 									   scene_buffer_apply_opacity, &opacity);
 
@@ -1244,7 +1259,7 @@ void client_animation_next_tick(Client *c) {
 
 		if (c->animation.tagouting) {
 			c->animation.tagouting = false;
-			wlr_scene_node_set_enabled(&c->scene->node, false);
+			client_update_visibility(c);
 			c->animation.tagouted = true;
 			c->animation.current = c->geom;
 			client_apply_clip(c, 1.0f);
@@ -1286,7 +1301,8 @@ void init_fadeout_client(Client *c) {
 	fadeout_client->animation_type_open = ANIM_TYPE_UNSET;
 	fadeout_client->animation_type_close = ANIM_TYPE_UNSET;
 
-	wlr_scene_node_set_enabled(&c->scene->node, true);
+	c->snapshot_temp_visible = true;
+	client_update_visibility(c);
 	client_set_border_color(c, config.bordercolor);
 	if (c->ov_card_tree) {
 		/*
@@ -1307,7 +1323,8 @@ void init_fadeout_client(Client *c) {
 		fadeout_client->scene =
 			wlr_scene_tree_snapshot(&c->scene->node, server.layers[LyrFadeOut]);
 	}
-	wlr_scene_node_set_enabled(&c->scene->node, false);
+	c->snapshot_temp_visible = false;
+	client_update_visibility(c);
 
 	if (!fadeout_client->scene) {
 		free(fadeout_client);
@@ -1322,7 +1339,7 @@ void init_fadeout_client(Client *c) {
 	fadeout_client->animation_type_close = c->animation_type_close;
 	fadeout_client->animation.action = CLOSE;
 	fadeout_client->bw = c->bw;
-	fadeout_client->nofadeout = c->nofadeout;
+	fadeout_client->no_fade_out = c->no_fade_out;
 
 	fadeout_client->animation.initial.x = 0;
 	fadeout_client->animation.initial.y = 0;
@@ -1414,7 +1431,7 @@ void client_animation_resume(Client *c, double remaining) {
 		c->animation.running = false;
 		if (c->animation.tagouting) {
 			c->animation.tagouting = false;
-			wlr_scene_node_set_enabled(&c->scene->node, false);
+			client_update_visibility(c);
 			c->animation.tagouted = true;
 			c->animation.current = c->geom;
 		}
@@ -1482,7 +1499,7 @@ void client_set_pending_state(Client *c) {
 		c->animation.duration = 0;
 	}
 
-	if (c->isnoanimation) {
+	if (c->no_animation) {
 		c->animation.should_animate = false;
 		c->animation.duration = 0;
 	}
@@ -1490,7 +1507,7 @@ void client_set_pending_state(Client *c) {
 	client_commit(c);
 	c->dirty = true;
 }
-void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
+void resize(Client *c, struct wlr_box geo, ResizeOpts opts) {
 	if (!c || !c->mon || !client_surface(c)->mapped)
 		return;
 
@@ -1515,9 +1532,16 @@ void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 		client_apply_bounds(c, bbox);
 	}
 
-	if (!c->isnosizehint && !c->ismaximizescreen && !c->isfullscreen &&
-		c->isfloating)
+	if (!c->no_size_hint && !c->ismaximizescreen && !c->isfullscreen &&
+		c->isfloating) {
+		int32_t anchor_right = c->geom.x + c->geom.width;
+		int32_t anchor_bottom = c->geom.y + c->geom.height;
 		client_set_size_bound(c);
+		if (opts.drag_edge & WLR_EDGE_LEFT)
+			c->geom.x = anchor_right - c->geom.width;
+		if (opts.drag_edge & WLR_EDGE_TOP)
+			c->geom.y = anchor_bottom - c->geom.height;
+	}
 
 	if (!c->is_pending_open_animation)
 		c->animation.begin_fade_in = false;
@@ -1552,7 +1576,7 @@ void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 	else
 		c->animainit_geom = c->animation.current;
 
-	if (c->isnoborder || c->iskilling)
+	if (c->no_border || c->iskilling)
 		c->bw = 0;
 	else if (!c->isfullscreen)
 		c->bw = config.borderpx;
@@ -1566,8 +1590,9 @@ void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 	}
 
 	if (!c->mon->isoverview)
-		c->configure_serial = client_set_size(c, c->geom.width - 2 * c->bw,
-											  c->geom.height - 2 * c->bw);
+		c->configure_serial =
+			client_set_size(c, c->geom.width - 2 * c->bw,
+							c->geom.height - 2 * c->bw, opts.force_configure);
 
 	if (c->configure_serial != 0)
 		c->mon->resizing_count_pending++;
@@ -1585,7 +1610,8 @@ void resize_apply(Client *c, struct wlr_box geo, ResizeOpts opts) {
 
 		client_draw_border(c, offsets);
 		client_get_clip(c, &clip);
-		client_draw_groupbar(c, offsets);
+		client_draw_group_bar(c, offsets);
+		client_draw_tabbar(c, offsets);
 		client_draw_shadow(c, offsets);
 
 		struct ivec2 surface_clip_offset = clip_to_hide(c, &clip, offsets);
@@ -1701,10 +1727,6 @@ void client_set_unfocused_opacity_animation(Client *c) {
 
 	client_start_focus_animation(c, false);
 }
-void resize(Client *c, struct wlr_box geo, int32_t interact) {
-	resize_apply(c, geo, (ResizeOpts){.interact = interact});
-}
-
 void client_set_focused_opacity_animation(Client *c) {
 	wlr_scene_node_lower_to_bottom(&c->border->node);
 
@@ -1717,7 +1739,7 @@ void client_set_focused_opacity_animation(Client *c) {
 }
 
 bool client_apply_focus_opacity(Client *c) {
-	if (config.blur && !c->noblur && c->blur_opacity != 1.0f &&
+	if (config.blur && !c->no_blur && c->blur_opacity != 1.0f &&
 		c->animation.action != OPEN) {
 		c->blur_opacity = 1.0f;
 		wlr_scene_blur_set_strength(c->blur, 1.0f);
@@ -1740,7 +1762,7 @@ bool client_apply_focus_opacity(Client *c) {
 
 		double opacity_eased_progress =
 			find_animation_curve_at(linear_progress, OPAFADEIN);
-		float percent = config.animation_fade_in && !c->nofadein
+		float percent = config.animation_fade_in && !c->no_fade_in
 							? opacity_eased_progress
 							: 1.0;
 		float opacity =
@@ -1778,7 +1800,7 @@ bool client_apply_focus_opacity(Client *c) {
 
 		c->opacity_animation.current_opacity = target_opacity;
 		client_set_opacity(c, target_opacity);
-		if (config.blur && !c->noblur && !config.blur_optimized) {
+		if (config.blur && !c->no_blur && !client_blur_uses_wallpaper(c)) {
 			float blur_val = MIN(percent * (1.0 - config.fadein_begin_opacity) +
 									 config.fadein_begin_opacity,
 								 1.0);

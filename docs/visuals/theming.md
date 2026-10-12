@@ -9,11 +9,11 @@ Control the sizing of window borders and gaps.
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `borderpx` | `4` | Border width in pixels. |
-| `gappih` | `5` | Horizontal inner gap (between windows). |
-| `gappiv` | `5` | Vertical inner gap. |
-| `gappoh` | `10` | Horizontal outer gap (between windows and screen edges). |
-| `gappov` | `10` | Vertical outer gap. |
+| `border_px` | `4` | Border width in pixels. |
+| `gap_inner_horizontal` | `5` | Horizontal inner gap (between windows). |
+| `gap_inner_vertical` | `5` | Vertical inner gap. |
+| `gap_outer_horizontal` | `10` | Horizontal outer gap (between windows and screen edges). |
+| `gap_outer_vertical` | `10` | Vertical outer gap. |
 
 ## Colors
 
@@ -21,22 +21,22 @@ Colors are defined in `0xRRGGBBAA` hex format.
 
 ```ini
 # Background color of the root window
-rootcolor=0x323232ff
+root_color=0x323232ff
 
 # Inactive window border
-bordercolor=0x444444ff
+border_color=0x444444ff
 
 # Drop shadow when dragging windows
-dropcolor=0x8FBA7C55
+drop_color=0x8FBA7C55
 
 # Split window border color in manual dwindle layout
-splitcolor=0xEB441EFF
+split_color=0xEB441EFF
 
 # Active window border
-focuscolor=0xc66b25ff
+focus_color=0xc66b25ff
 
 # Urgent window border (alerts)
-urgentcolor=0xad401fff
+urgent_color=0xad401fff
 ```
 
 ### State-Specific Colors
@@ -45,10 +45,10 @@ You can also color-code windows based on their state:
 
 | State | Config Key | Default Color |
 | :--- | :--- | :--- |
-| Maximized | `maximizescreencolor` | `0x89aa61ff` |
-| Scratchpad | `scratchpadcolor` | `0x516c93ff` |
-| Global | `globalcolor` | `0xb153a7ff` |
-| Overlay | `overlaycolor` | `0x14a57cff` |
+| Maximized | `maximized_screen_color` | `0x89aa61ff` |
+| Scratchpad | `scratchpad_color` | `0x516c93ff` |
+| Global | `global_color` | `0xb153a7ff` |
+| Overlay | `overlay_color` | `0x14a57cff` |
 
 > **Tip:** For scratchpad window sizing, see [Scratchpad](/docs/window-management/scratchpad) configuration.
 
@@ -66,20 +66,40 @@ You can also color-code windows based on their state:
 | `jump_label_decorate_padding_y` | `10` | vertical padding.|
 | `jump_label_decorate_font_desc` | `monospace Bold 16` | font set.|
 
-### Tab Bar For Monocle Layout
+### Group Bar
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `group_bar_height` | `50` | Height of the tab bar for monocle layout. |
-| `group_bar_decorate_fg_color` | `0xc4939dff` | text color.
-| `group_bar_decorate_bg_color` | `0x201b14ff` | background color.|
-| `group_bar_decorate_focus_fg_color` | `0x201b14ff` | text color for focus. |
-| `group_bar_decorate_focus_bg_color` | `0xc4939dff` | background color for focus.|
-| `group_bar_decorate_border_color` | `0x8BAA9Bff` | border color.|
+| `always_show_group_bar` | `0` | Show the group bar (with close button) on every window. |
+| `group_bar_height` | `33` | Group bar height. |
+| `group_bar_close_button_enable` | `1` | Show the close button. |
+| `group_bar_button_size` | `16` | Close button size in px. |
+| `group_bar_button_margin` | `4` | Close button inset from the right edge in px. |
+| `group_bar_button_color` | `0xad401fff` | Close button colour. |
+| `group_bar_decorate_fg_color` | `0xc0caf5ff` | text color.
+| `group_bar_decorate_bg_color` | `0x1d2021ff` | background color.|
+| `group_bar_decorate_focus_fg_color` | `0x9ece6aff` | text color for focus. |
+| `group_bar_decorate_focus_bg_color` | `0x3c3836ff` | background color for focus.|
+| `group_bar_decorate_border_color` | `0x3b4261ff` | border color.|
 | `group_bar_decorate_border_width` | `4` | border width.|
 | `group_bar_decorate_corner_radius` | `5` | corner radius.|
 | `group_bar_decorate_padding_x` | `0` | horizontal padding.|
 | `group_bar_decorate_padding_y` | `0` | vertical padding.|
-| `group_bar_decorate_font_desc` | `monospace Bold 16` | font set.|
+| `group_bar_decorate_font_desc` | `monospace Bold 13` | font set.|
+
+### Auto Tab Bar
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| `tab_bar_height` | `33` | Height of the auto tab bar. |
+| `tab_bar_decorate_fg_color` | `0xc0caf5ff` | text color.
+| `tab_bar_decorate_bg_color` | `0x1d2021ff` | background color.|
+| `tab_bar_decorate_focus_fg_color` | `0x7aa2f7ff` | text color for focus. |
+| `tab_bar_decorate_focus_bg_color` | `0x3c3836ff` | background color for focus.|
+| `tab_bar_decorate_border_color` | `0x3b4261ff` | border color.|
+| `tab_bar_decorate_border_width` | `4` | border width.|
+| `tab_bar_decorate_corner_radius` | `5` | corner radius.|
+| `tab_bar_decorate_padding_x` | `0` | horizontal padding.|
+| `tab_bar_decorate_padding_y` | `0` | vertical padding.|
+| `tab_bar_decorate_font_desc` | `monospace Bold 13` | font set.|
 
 ## Borders
 

@@ -6,6 +6,7 @@
 #include "mango/layout/layout.h"
 #include "mango/manage/client.h"
 #include "mango/manage/monitor.h"
+#include "mango/manage/tab.h"
 #include <scenefx/types/wlr_scene.h>
 #include <wlr/types/wlr_compositor.h>
 #include <wlr/types/wlr_xdg_shell.h>
@@ -85,7 +86,6 @@ void overview_card_surface_add(struct wlr_surface *surface, int sx, int sy,
 	}
 	entry->buffer = entry->scene_surface->buffer;
 	wlr_scene_buffer_set_filter_mode(entry->buffer, WLR_SCALE_FILTER_BILINEAR);
-	entry->buffer->node.data = c; /* Hit test. */
 
 	entry->commit.notify = handle_overview_card_surface_commit;
 	wl_signal_add(&surface->events.commit, &entry->commit);
@@ -234,8 +234,8 @@ void overview_layout_card(Client *c) {
 }
 
 void overview_update_jump_label(Client *c) {
-	if (!c || !c->mon || !c->ov_card_tree || !c->jump_label_node ||
-		!c->mon->isoverview || !c->mon->is_jump_mode || !c->jump_char)
+	if (!c || !c->mon || !c->ov_card_tree || !c->mon->isoverview ||
+		!c->mon->is_jump_mode || !c->jump_char)
 		return;
 
 	struct wlr_scene_node *label = &c->jump_label_node->scene->node;
@@ -299,17 +299,15 @@ void overview_backup_surface(Client *c) {
 
 	// Disables the real surface tree.
 	c->overview_scene_surface = c->scene_surface;
-	wlr_scene_node_set_enabled(&c->scene_surface->node, false);
 
 	// In overview every tag window must show its card and must not be disabled
 	// by the subtree hiding logic.
 	c->is_clip_to_hide = false;
-	wlr_scene_node_set_enabled(&c->scene->node, true);
+	client_update_visibility(c);
 
 	c->ov_card_tree = wlr_scene_tree_create(c->scene);
 	if (!c->ov_card_tree)
 		return;
-	c->ov_card_tree->node.data = c; // Hit test.
 
 	// Walks the surface tree and creates a card node per surface.
 	wlr_surface_for_each_surface(client_surface(c), overview_card_surface_add,
@@ -317,7 +315,7 @@ void overview_backup_surface(Client *c) {
 
 	// The card tree is created at the scene top; enabled jump labels are raised
 	// above the cards.
-	if (c->jump_label_node && c->jump_label_node->scene->node.enabled)
+	if (c->jump_label_node->scene->node.enabled)
 		wlr_scene_node_raise_to_top(&c->jump_label_node->scene->node);
 
 	overview_layout_card(c);
@@ -350,10 +348,11 @@ void overview_backup(Client *c) {
 			c, 0); // Clears the window fullscreen flag.
 		client_pending_maximized_state(c, 0);
 	}
-	c->bw = c->isnoborder ? 0 : config.borderpx;
+	c->bw = c->no_border ? 0 : config.borderpx;
 
 	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT |
 							WLR_EDGE_RIGHT);
+	client_sync_layer(c);
 }
 // Restores window state when switching back from overview to the normal view.
 void overview_restore(Client *c, const Arg *arg) {
@@ -376,13 +375,13 @@ void overview_restore(Client *c, const Arg *arg) {
 	if (c->overview_scene_surface) {
 		c->scene_surface = c->overview_scene_surface;
 		c->overview_scene_surface = NULL;
-		wlr_scene_node_set_enabled(&c->scene_surface->node, true);
+		client_update_visibility(c);
 	}
 
 	if (c->isfloating) {
 		// XRaiseWindow(display, c->win); // Raise the floating window to the
 		// top
-		resize(c, c->overview_backup_geom, 0);
+		resize(c, c->overview_backup_geom, (ResizeOpts){.interact = 0});
 	} else if (c->isfullscreen || c->ismaximizescreen) {
 		if (want_restore_fullscreen(c) && c->ismaximizescreen) {
 			client_set_maximize_screen(c, 1, false);
@@ -396,16 +395,18 @@ void overview_restore(Client *c, const Arg *arg) {
 	} else {
 		if (c->is_restoring_from_ov) {
 			c->is_restoring_from_ov = false;
-			resize(c, c->overview_backup_geom, 0);
+			resize(c, c->overview_backup_geom, (ResizeOpts){.interact = 0});
 		}
 	}
 
 	if (c->bw == 0 && !c->isfullscreen) { // Windows created while in overview
 										  // mode have no bw record.
-		c->bw = c->isnoborder ? 0 : config.borderpx;
+		c->bw = c->no_border ? 0 : config.borderpx;
 	}
 
 	if (c->isfloating && !c->force_tiled_state) {
 		client_set_tiled(c, WLR_EDGE_NONE);
 	}
+
+	client_sync_layer(c);
 }

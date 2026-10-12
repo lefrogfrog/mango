@@ -12,7 +12,7 @@ void get_layout_abbr(char *abbr, const char *full_name);
 Client *client_at_point(double x, double y);
 bool layer_ignores_focus(LayerSurface *l);
 void node_at_point(double x, double y, struct wlr_surface **psurface,
-				   Client **pc, LayerSurface **pl, MangoGroupBar **gb,
+				   Client **pc, LayerSurface **pl, MangoBarDecoration **bar,
 				   double *nx, double *ny);
 
 /*
@@ -44,6 +44,9 @@ void handle_xdg_decoration_mode_request(struct wl_listener *listener,
 void handle_drm_lease_request(struct wl_listener *listener, void *data);
 void handle_request_set_primary_selection(struct wl_listener *listener,
 										  void *data);
+void apply_primary_selection(void);
+bool mango_global_filter(const struct wl_client *client,
+						 const struct wl_global *global, void *data);
 void handle_request_set_selection(struct wl_listener *listener, void *data);
 void check_keep_idle_inhibit(Client *c);
 int32_t idle_keep_inhibit(void *data);

@@ -1,6 +1,6 @@
 #include "mango/layout/overview.h"
 #include "mango/common/server.h"
-#include "mango/config/parse_config.h"
+#include "mango/config/parse.h"
 #include "mango/manage/client.h"
 #include "mango/manage/monitor.h"
 #include "mango/overview/overview.h"
@@ -345,7 +345,7 @@ void overview_scale(Monitor *m) {
 		}
 
 		for (int k = 0; k < n; k++) {
-			client_tile_resize(items[k].c, overview_boxes[k], 0);
+			client_tile_resize(items[k].c, overview_boxes[k], 0, NULL);
 		}
 		free(overview_boxes);
 	}
@@ -407,7 +407,8 @@ void overview_layout_column(Monitor *m, Client **items, int cnt, float x,
 		int ix = (int)(x + (col_w - ws[i]) / 2.0f + 0.5f);
 		int iy = (int)(y + 0.5f);
 		client_tile_resize(items[i],
-						   (struct wlr_box){ix, iy, (int)ws[i], (int)hs[i]}, 0);
+						   (struct wlr_box){ix, iy, (int)ws[i], (int)hs[i]}, 0,
+						   NULL);
 		y += hs[i] + gap;
 	}
 
@@ -496,7 +497,8 @@ void overview_scale_tab(Monitor *m) {
 		}
 		int ix = (int)(center_x + (center_w - w) / 2.0f + 0.5f);
 		int iy = (int)(base_y + (avail_h - h) / 2.0f + 0.5f);
-		client_tile_resize(focus, (struct wlr_box){ix, iy, (int)w, (int)h}, 0);
+		client_tile_resize(focus, (struct wlr_box){ix, iy, (int)w, (int)h}, 0,
+						   NULL);
 	}
 
 	// The rest split into the left/right columns; on focus change they
@@ -553,8 +555,6 @@ void create_jump_hints(Monitor *m) {
 			find_keycodes_for_char(c_char, &c->jump_keycodes);
 
 			char label_text[2] = {c_char, '\0'};
-			if (!c->jump_label_node)
-				continue;
 			mango_jump_label_node_update(c->jump_label_node, label_text,
 										 m->wlr_output->scale);
 			overview_update_jump_label(c);
