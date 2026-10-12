@@ -3,6 +3,7 @@
 #include "mango/common/log.h"
 #include "mango/common/server.h"
 #include "mango/common/util.h"
+#include "mango/config/parse_config.h"
 #include "mango/dispatch/bind.h"
 #include "mango/ext-protocol/foreign-toplevel.h"
 #include "mango/ext-protocol/text-input.h"
@@ -3993,6 +3994,10 @@ uint32_t client_target_layer(Client *c) {
 
 	if (c->isoverlay)
 		return special_overlay ? LyrSpecialOverlay : LyrOverlay;
+
+	if (config.focused_win_above_fullscreen) {
+		return LyrFullscreen;
+	}
 
 	if (config.float_full_to_top) {
 		if (special_overlay)

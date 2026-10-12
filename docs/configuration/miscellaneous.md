@@ -18,6 +18,7 @@ description: Advanced settings for XWayland, focus behavior, and system integrat
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `focus_on_activate` | `1` | Automatically focus windows when they request activation. |
+| `focused_win_above_fullscreen` | `0` | Focused window will be displayed above fullscreen layer. |
 | `sloppyfocus` | `1` | Focus follows the mouse cursor. |
 | `map_focus_monitor` | `0` | Map tablets to the focused monitor automatically. When disabled, a tablet is only mapped to a monitor if a `device` rule pins it via `monitor`. |
 | `warpcursor` | `1` | Warp the cursor to the center of the window when focus changes via keyboard. |
